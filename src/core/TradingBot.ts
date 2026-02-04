@@ -551,12 +551,14 @@ export class TradingBot {
                 // [NUEVO] Lógica de Trailing Stop (LONG) - AJUSTADO PARA SCALPING
                 const pnlPercent = (currentPrice - position.entryPrice) / position.entryPrice;
                 // 1. Activación: Ganancia > 0.35% (Mitad del camino al 0.7% TP)
-                if (pnlPercent > 0.0035) {
-                    // Mover a Break-Even + 0.1% (cubrir comisiones)
+
+                // 1. Activación: Ganancia > 0.15% (1.5% ROI) - GARANTIZA RENTABILIDAD
+                if (pnlPercent > 0.0015) {
+                    // Mover a Break-Even + 0.1% (cubrir comisiones 0.07% + ganancia)
                     const breakEvenPlus = position.entryPrice * 1.001;
 
-                    // O mantener un Trailing del 0.2% de distancia
-                    const trailingLevel = currentPrice * 0.998; // 0.2% distancia
+                    // O mantener un Trailing del 0.05% de distancia (0.5% ROI)
+                    const trailingLevel = currentPrice * 0.9995; // 0.05% distancia
                     // El nuevo SL debe ser el mayor de los dos
                     let newStopLoss = Math.max(breakEvenPlus, trailingLevel);
                     // Solo actualizar si el nuevo SL es mayor que el actual
@@ -575,10 +577,12 @@ export class TradingBot {
                 // [NUEVO] Lógica de Trailing Stop (SHORT) - AJUSTADO PARA SCALPING
                 const pnlPercent = (position.entryPrice - currentPrice) / position.entryPrice;
                 // 1. Activación: Ganancia > 0.35%
-                if (pnlPercent > 0.0035) {
+
+                // 1. Activación: Ganancia > 0.15% (1.5% ROI) - GARANTIZA RENTABILIDAD
+                if (pnlPercent > 0.0015) {
                     // Break-Even - 0.1%
                     const breakEvenPlus = position.entryPrice * 0.999;
-                    const trailingLevel = currentPrice * 1.002; // 0.2% distancia
+                    const trailingLevel = currentPrice * 1.0005; // 0.05% distancia
                     // El nuevo SL debe ser el menor de los dos
                     let newStopLoss = Math.min(breakEvenPlus, trailingLevel);
                     // Solo actualizar si el nuevo SL es menor que el actual

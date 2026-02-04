@@ -398,12 +398,13 @@ export class ExchangeConnector {
                     triggerPrice: stopLoss,
                     reduceOnly: true
                 };
+                // Usamos 'stop' (Stop-Limit en Binance) para que aparezca en el libro y busque ser MAKER
                 await this.exchange.createOrder(
                     symbol,
-                    'stop_market',
+                    'stop',
                     slSide,
                     amount,
-                    undefined, // stop_market doesn't use price arg in createOrder for some drivers
+                    stopLoss, // Limit Price
                     params
                 );
                 logger.debug({ stopLoss }, 'Stop loss order created');
@@ -537,7 +538,7 @@ export class ExchangeConnector {
             }
         } catch (error: any) {
             logger.error({ error: error.message, symbol }, 'Failed to close positions');
-            // throw error; // Don't crash on closing error in loop
+            throw error; // Propagate error for UI/Telegram feedback
         }
     }
 

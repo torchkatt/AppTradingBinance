@@ -1,6 +1,7 @@
 import { Strategy } from './base/Strategy.js';
 import { OHLCV, Signal } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { config } from '../config/index.js';
 /**
  * Estrategia de Mean Reversion usando Bollinger Bands + RSI
  * 
@@ -50,14 +51,20 @@ export class MeanReversionStrategy extends Strategy {
         // SEÑAL LONG: Precio en banda inferior + RSI oversold (AGRESIVO: umbral 0.3)
         // [FILTRO TENDENCIA] Solo operar LONG si el precio está POR ENCIMA de la EMA200 (Tendencia Alcista)
         if (percentB <= 0.3 && rsi < this.rsiOversold && currentPrice > ema200) {
-            // OPTIMIZADO: Objetivo rápido de $5-6 USD (0.7% movimiento)
+            // OPTIMIZADO: Objetivo de 10% ROI (1.0% movimiento)
             // Con apalancamiento 10x en posición de $100 (exposición $1,000):
-            // 0.7% × $1,000 = $7 bruto - $1.50 comisión = ~$5.50 ganancia neta
-            const takeProfitPrice = currentPrice * 1.007; // +0.7%
+            // 1.0% × $1,000 = $10 bruto
+            const takeProfitPrice = currentPrice * 1.01; // +1.0%
+            // CALCULOD DE SL CON TECHO DE SEGURIDAD (ANTI-LIQUIDACIÓN)
+            const atrDistance = this.atrMultiplier * atr;
+            const maxDistance = currentPrice * config.MAX_STOP_LOSS_PCT;
+            const effectiveDistance = Math.min(atrDistance, maxDistance);
+            const stopLoss = currentPrice - effectiveDistance;
+
             const signal: Signal = {
                 type: 'long',
                 confidence: this.calculateConfidence(rsi, this.rsiOversold, percentB, 'long'),
-                stopLoss: currentPrice - (this.atrMultiplier * atr),
+                stopLoss: stopLoss,
                 takeProfit: takeProfitPrice,
                 metadata: {
                     rsi,
@@ -69,7 +76,7 @@ export class MeanReversionStrategy extends Strategy {
                     atr,
                     ema200,
                     strategy: this.name,
-                    takeProfitPct: 0.7,  // Rastreo de porcentaje TP
+                    takeProfitPct: 1.0,  // 10% ROI con 10x
                 }
             };
             logger.info({
@@ -85,12 +92,18 @@ export class MeanReversionStrategy extends Strategy {
         // SEÑAL SHORT: Precio en banda superior + RSI overbought (AGRESIVO: umbral 0.7)
         // [FILTRO TENDENCIA] Solo operar SHORT si el precio está POR DEBAJO de la EMA200 (Tendencia Bajista)
         if (percentB >= 0.7 && rsi > this.rsiOverbought && currentPrice < ema200) {
-            // OPTIMIZADO: Objetivo rápido de $5-6 USD (0.7% movimiento)
-            const takeProfitPrice = currentPrice * 0.993; // -0.7%
+            // OPTIMIZADO: Objetivo de 10% ROI (1.0% movimiento)
+            const takeProfitPrice = currentPrice * 0.99; // -1.0%
+            // CALCULOD DE SL CON TECHO DE SEGURIDAD (ANTI-LIQUIDACIÓN)
+            const atrDistance = this.atrMultiplier * atr;
+            const maxDistance = currentPrice * config.MAX_STOP_LOSS_PCT;
+            const effectiveDistance = Math.min(atrDistance, maxDistance);
+            const stopLoss = currentPrice + effectiveDistance;
+
             const signal: Signal = {
                 type: 'short',
                 confidence: this.calculateConfidence(rsi, this.rsiOverbought, percentB, 'short'),
-                stopLoss: currentPrice + (this.atrMultiplier * atr),
+                stopLoss: stopLoss,
                 takeProfit: takeProfitPrice,
                 metadata: {
                     rsi,
@@ -102,7 +115,7 @@ export class MeanReversionStrategy extends Strategy {
                     atr,
                     ema200,
                     strategy: this.name,
-                    takeProfitPct: 1.2,
+                    takeProfitPct: 1.0, // 10% ROI con 10x
                 }
             };
             logger.info({
