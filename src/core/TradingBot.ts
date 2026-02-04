@@ -306,7 +306,7 @@ export class TradingBot {
                     symbol,
                     config.TIMEFRAME,
                     undefined,
-                    100 // Suficiente para indicadores
+                    300 // Suficiente para EMA 200 + margen de estabilización
                 );
 
                 if (data.length < 50) {
@@ -598,13 +598,28 @@ export class TradingBot {
             if (position.takeProfit) {
                 if (position.side === 'long' && currentPrice >= position.takeProfit) {
                     shouldClose = true;
-                    reason = 'Take Profit hit';
+                    reason = 'Take Profit alcanzado (Book)';
                 } else if (position.side === 'short' && currentPrice <= position.takeProfit) {
                     shouldClose = true;
-                    reason = 'Take Profit hit';
+                    reason = 'Take Profit alcanzado (Book)';
                 }
             }
+
             if (shouldClose) {
+                // [SYNC] Antes de cerrar manualmente, verificar si la posición ya fue cerrada por órdenes programadas
+                try {
+                    const exchangePositions = await this.exchange.getOpenPositions(symbol);
+                    const exPos = exchangePositions.find(p => p.symbol === symbol || p.info?.symbol === symbol.replace('/', ''));
+
+                    if (!exPos || Math.abs(exPos.contracts || exPos.amount || 0) < 0.00001) {
+                        logger.info({ symbol, reason }, '🎊 Posición ya cerrada por Orden Programada (MAKER). Sincronizando estado local...');
+                        this.riskManager.closePosition(symbol, currentPrice);
+                        return;
+                    }
+                } catch (e) {
+                    // Si falla la verificación, procedemos con el cierre normal por seguridad
+                }
+
                 logger.info({ symbol, reason, currentPrice }, 'Closing position due to SL/TP');
                 await this.closePosition(symbol, currentPrice);
             }

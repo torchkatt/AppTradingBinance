@@ -180,8 +180,8 @@ export class ExchangeConnector {
             try {
                 // 1. Configurar Apalancamiento (Max 10x)
                 try {
-                    await this.exchange.setLeverage(10, symbol);
-                    logger.debug({ symbol }, '✅ Leverage set to 10x');
+                    await this.exchange.setLeverage(config.DEFAULT_LEVERAGE, symbol);
+                    logger.debug({ symbol, leverage: config.DEFAULT_LEVERAGE }, '✅ Leverage set');
                 } catch (e: any) {
                     if (e.message.includes('already set to')) {
                         logger.debug({ symbol }, 'ℹ️ Leverage already 10x');
@@ -307,7 +307,8 @@ export class ExchangeConnector {
                 const ticker = await this.getTicker(symbol);
                 if (!ticker) throw new Error(`No se pudo obtener el ticker para ${symbol}`);
 
-                const targetPrice = side === 'buy' ? ticker.bid : ticker.ask;
+                // FALLBACK: Usar el mejor precio disponible (Bid/Ask) o el Precio Último
+                const targetPrice = side === 'buy' ? (ticker.bid || ticker.last) : (ticker.ask || ticker.last);
 
                 logger.info({
                     symbol,
@@ -392,16 +393,17 @@ export class ExchangeConnector {
             if (stopLoss) {
                 const slSide = side === 'buy' ? 'sell' : 'buy';
                 // CCXT for Binance requires 'stopPrice' in params (sometimes 'triggerPrice')
-                const params = {
+                const params: any = {
                     stopPrice: stopLoss,
                     triggerPrice: stopLoss,
+                    reduceOnly: true
                 };
                 await this.exchange.createOrder(
                     symbol,
                     'stop_market',
                     slSide,
                     amount,
-                    stopLoss, // Pass as price arg too
+                    undefined, // stop_market doesn't use price arg in createOrder for some drivers
                     params
                 );
                 logger.debug({ stopLoss }, 'Stop loss order created');
@@ -410,16 +412,16 @@ export class ExchangeConnector {
             // Crear take profit si está especificado
             if (takeProfit) {
                 const tpSide = side === 'buy' ? 'sell' : 'buy';
-                const params = {
-                    stopPrice: takeProfit,
-                    triggerPrice: takeProfit,
+                const params: any = {
+                    reduceOnly: true
                 };
+                // Usamos 'limit' en lugar de 'take_profit_market' para entrar como MAKER
                 await this.exchange.createOrder(
                     symbol,
-                    'take_profit_market',
+                    'limit',
                     tpSide,
                     amount,
-                    takeProfit, // Pass as price arg too
+                    takeProfit,
                     params
                 );
                 logger.debug({ takeProfit }, 'Take profit order created');

@@ -41,6 +41,7 @@ Thumbs.db
 backtest_results/
 *.csv
 risk_state.json
+data/
 brain/
 .gemini/
 .agent/

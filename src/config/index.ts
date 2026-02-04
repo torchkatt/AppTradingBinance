@@ -14,6 +14,8 @@ const ConfigSchema = z.object({
     MAX_POSITION_SIZE_PCT: z.number().min(0).max(1).default(0.1), // 10% máximo por posición
     MAX_DAILY_LOSS_PCT: z.number().min(0).max(1).default(0.03), // 3% pérdida diaria máxima
     RISK_PER_TRADE_PCT: z.number().min(0).max(0.05).default(0.01), // 1% por trade
+    MAX_OPEN_POSITIONS: z.number().int().min(1).default(6),
+    DEFAULT_LEVERAGE: z.number().min(1).max(125).default(10), // 10x por defecto
 
     // Database
     DATABASE_URL: z.string().url(),
@@ -48,6 +50,8 @@ function parseConfig(): Config {
             MAX_POSITION_SIZE_PCT: Number(process.env.MAX_POSITION_SIZE_PCT),
             MAX_DAILY_LOSS_PCT: Number(process.env.MAX_DAILY_LOSS_PCT),
             RISK_PER_TRADE_PCT: Number(process.env.RISK_PER_TRADE_PCT),
+            MAX_OPEN_POSITIONS: Number(process.env.MAX_OPEN_POSITIONS) || 6,
+            DEFAULT_LEVERAGE: Number(process.env.DEFAULT_LEVERAGE) || 10,
 
             DATABASE_URL: process.env.DATABASE_URL,
             REDIS_URL: process.env.REDIS_URL,

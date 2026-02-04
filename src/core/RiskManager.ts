@@ -68,35 +68,41 @@ export class RiskManager {
     calculatePositionSize(
         entryPrice: number,
         stopLossPrice: number,
-        symbol?: string  // Parámetro de símbolo (opcional)
+        symbol?: string
     ): number {
         const balance = this.getEffectiveBalance();
+
+        // 1. Cálculo basado en Riesgo Fijo (1% del capital)
         const riskAmount = balance * config.RISK_PER_TRADE_PCT;
-        // Calcular distancia al stop loss en precio
         const riskPerUnit = Math.abs(entryPrice - stopLossPrice);
-        if (riskPerUnit === 0) {
-            logger.warn('Stop loss price igual al entry price, usando riesgo mínimo');
-            return 0.001; // Posición mínima de seguridad
-        }
-        // Calcular cantidad basada en riesgo
-        const positionSize = riskAmount / riskPerUnit;
-        // Aplicar límite de tamaño máximo de posición
-        const maxPositionValue = balance * config.MAX_POSITION_SIZE_PCT;
-        const maxPositionSize = maxPositionValue / entryPrice;
-        const finalSize = Math.min(positionSize, maxPositionSize);
-        // Redondear al paso del exchange (Bybit: varía por símbolo)
-        const roundedSize = this.roundToStepSize(finalSize, symbol);
+        const riskBasedSize = riskPerUnit > 0 ? riskAmount / riskPerUnit : 0;
+
+        // 2. Cálculo basado en Apalancamiento Fijo (User Request: 10x)
+        // Dividimos el capital total entre el máximo de posiciones y multiplicamos por el leverage
+        const leverageBasedSize = (balance / config.MAX_OPEN_POSITIONS) * config.DEFAULT_LEVERAGE / entryPrice;
+
+        // 3. Selección de tamaño: Priorizar apalancamiento solicitado por usuario
+        // AUNQUE el riesgo sea mayor al 1%, el usuario pidió 10x leverage en TODAS las operaciones.
+        let positionSize = leverageBasedSize;
+
+        // Límite de seguridad: Nunca más del capital balance total * leverage total
+        const absoluteMaxSize = (balance * config.DEFAULT_LEVERAGE) / entryPrice;
+        positionSize = Math.min(positionSize, absoluteMaxSize);
+
+        // Redondear al paso del exchange
+        const roundedSize = this.roundToStepSize(positionSize, symbol);
+
         logger.info({
             entryPrice,
             stopLossPrice,
-            riskAmount,
-            riskPerUnit,
-            calculatedSize: positionSize,
-            maxSize: maxPositionSize,
-            finalSize,
+            riskBasedSize,
+            leverageBasedSize,
+            finalSize: positionSize,
             roundedSize,
-            symbol
-        }, 'Position size calculated');
+            symbol,
+            leverage: config.DEFAULT_LEVERAGE
+        }, 'Position size calculated (Fixed Leverage Mode)');
+
         return roundedSize;
     }
     /**
@@ -150,9 +156,8 @@ export class RiskManager {
             return { allowed: false, reason };
         }
         // Circuit Breaker #2: Número máximo de posiciones abiertas
-        const MAX_OPEN_POSITIONS = 6;  // AGRESIVO: Permitir más posiciones concurrentes
-        if (this.openPositions.size >= MAX_OPEN_POSITIONS) {
-            const reason = `⚠️ Número máximo de posiciones abiertas alcanzado (${MAX_OPEN_POSITIONS})`;
+        if (this.openPositions.size >= config.MAX_OPEN_POSITIONS) {
+            const reason = `⚠️ Número máximo de posiciones abiertas alcanzado (${config.MAX_OPEN_POSITIONS})`;
             logger.warn({ openPositions: this.openPositions.size }, reason);
             return { allowed: false, reason };
         }
