@@ -1,0 +1,50 @@
+{
+  "name": "professional-trading-system",
+  "version": "1.0.0",
+  "description": "Sistema de trading automatizado profesional con backtesting y gestión de riesgo",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.ts",
+    "backtest": "tsx src/backtesting/runner.ts",
+    "health-check": "tsx src/tools/health-check.ts",
+    "download-data": "tsx src/tools/download-data.ts",
+    "start:live": "caffeinate -i tsx src/index.ts",
+    "test": "vitest",
+    "type-check": "tsc --noEmit",
+    "db:migrate": "tsx src/database/migrate.ts"
+  },
+  "keywords": [
+    "trading",
+    "automation",
+    "backtesting",
+    "cryptocurrency",
+    "algorithmic-trading"
+  ],
+  "author": "Alexander Sandoval",
+  "license": "MIT",
+  "dependencies": {
+    "async-mutex": "^0.5.0",
+    "ccxt": "^4.2.25",
+    "dotenv": "^16.4.1",
+    "express": "^4.18.2",
+    "ioredis": "^5.3.2",
+    "node-telegram-bot-api": "^0.64.0",
+    "pg": "^8.11.3",
+    "pino": "^8.17.2",
+    "pino-pretty": "^10.3.1",
+    "technicalindicators": "^3.1.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.5",
+    "@types/node-telegram-bot-api": "^0.64.0",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.1"
+  }
+}

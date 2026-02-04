@@ -1,0 +1,10 @@
+{
+  "initialInvestment": 1000,
+  "totalBalance": 1000,
+  "operatingCapital": 1000,
+  "reservedFunds": 0,
+  "currentMilestone": 0,
+  "milestoneHistory": [],
+  "investmentRecovered": false,
+  "lastUpdated": "2026-01-30T14:05:41.388Z"
+}
