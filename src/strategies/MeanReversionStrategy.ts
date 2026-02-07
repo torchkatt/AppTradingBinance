@@ -20,9 +20,8 @@ export class MeanReversionStrategy extends Strategy {
         private bbPeriod: number = 20,
         private bbStdDev: number = 2,
         private rsiPeriod: number = 14,
-        private rsiOversold: number = 45,      // AGRESIVO: Máximas oportunidades
-        private rsiOverbought: number = 55,    // AGRESIVO: Máximas oportunidades
-        private atrMultiplier: number = 1.0    // OPTIMIZADO: ~0.8% SL para ratio R:R 1:1
+        private rsiOversold: number = 40,      // MODERADO: Más actividad (antes 45)
+        private rsiOverbought: number = 60,    // MODERADO: Más actividad (antes 55)
     ) {
         super();
     }
@@ -48,18 +47,19 @@ export class MeanReversionStrategy extends Strategy {
         const percentB = (currentPrice - lowerBand) / (upperBand - lowerBand);
         // Calcular EMA 200 para filtro de tendencia
         const ema200 = this.calculateEMA(closes, 200);
-        // SEÑAL LONG: Precio en banda inferior + RSI oversold (AGRESIVO: umbral 0.3)
-        // [FILTRO TENDENCIA] Solo operar LONG si el precio está POR ENCIMA de la EMA200 (Tendencia Alcista)
-        if (percentB <= 0.3 && rsi < this.rsiOversold && currentPrice > ema200) {
-            // OPTIMIZADO: Objetivo de 10% ROI (1.0% movimiento)
-            // Con apalancamiento 10x en posición de $100 (exposición $1,000):
-            // 1.0% × $1,000 = $10 bruto
-            const takeProfitPrice = currentPrice * 1.01; // +1.0%
-            // CALCULOD DE SL CON TECHO DE SEGURIDAD (ANTI-LIQUIDACIÓN)
-            const atrDistance = this.atrMultiplier * atr;
-            const maxDistance = currentPrice * config.MAX_STOP_LOSS_PCT;
-            const effectiveDistance = Math.min(atrDistance, maxDistance);
-            const stopLoss = currentPrice - effectiveDistance;
+        // SEÑAL LONG: Precio en banda inferior + RSI oversold
+        // [MODIFICADO] Excepción de Pánico: Si RSI < 30 (Muy barato), ignorar el filtro de tendencia EMA200.
+        // Si RSI entre 30-40, mantenemos el filtro conservador.
+        const isDeepOversold = rsi < 30; // Compra agresiva en caídas fuertes
+        const isStandardSignal = rsi < this.rsiOversold && currentPrice > ema200; // Compra estándar en tendencia
+
+        if (percentB <= 0.3 && (isDeepOversold || isStandardSignal)) {
+            // v4.0 TP/SL Logic using Config Targets
+            const tpPriceChange = currentPrice * (config.TAKE_PROFIT_ROI / config.DEFAULT_LEVERAGE);
+            const slPriceChange = currentPrice * (config.STOP_LOSS_ROI / config.DEFAULT_LEVERAGE);
+
+            const takeProfitPrice = currentPrice + tpPriceChange;
+            const stopLoss = currentPrice - slPriceChange;
 
             const signal: Signal = {
                 type: 'long',
@@ -92,13 +92,12 @@ export class MeanReversionStrategy extends Strategy {
         // SEÑAL SHORT: Precio en banda superior + RSI overbought (AGRESIVO: umbral 0.7)
         // [FILTRO TENDENCIA] Solo operar SHORT si el precio está POR DEBAJO de la EMA200 (Tendencia Bajista)
         if (percentB >= 0.7 && rsi > this.rsiOverbought && currentPrice < ema200) {
-            // OPTIMIZADO: Objetivo de 10% ROI (1.0% movimiento)
-            const takeProfitPrice = currentPrice * 0.99; // -1.0%
-            // CALCULOD DE SL CON TECHO DE SEGURIDAD (ANTI-LIQUIDACIÓN)
-            const atrDistance = this.atrMultiplier * atr;
-            const maxDistance = currentPrice * config.MAX_STOP_LOSS_PCT;
-            const effectiveDistance = Math.min(atrDistance, maxDistance);
-            const stopLoss = currentPrice + effectiveDistance;
+            // v4.0 TP/SL Logic using Config Targets
+            const tpPriceChange = currentPrice * (config.TAKE_PROFIT_ROI / config.DEFAULT_LEVERAGE);
+            const slPriceChange = currentPrice * (config.STOP_LOSS_ROI / config.DEFAULT_LEVERAGE);
+
+            const takeProfitPrice = currentPrice - tpPriceChange;
+            const stopLoss = currentPrice + slPriceChange;
 
             const signal: Signal = {
                 type: 'short',

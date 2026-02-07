@@ -1,4 +1,4 @@
-import pino from 'pino';
+import { pino } from 'pino';
 
 /**
  * Sistema de logging profesional con niveles y formatos estructurados

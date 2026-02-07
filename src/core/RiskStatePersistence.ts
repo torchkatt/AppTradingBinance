@@ -10,6 +10,7 @@ export interface RiskState {
     dailyPnL: number;
     dailyTrades: number;
     lastUpdated: number;
+    date: string; // [FIX] Persist the date string to handle periodic resets correctly
 }
 
 /**
@@ -18,14 +19,16 @@ export interface RiskState {
 export function saveRiskState(
     positions: Map<string, Position>,
     dailyPnL: number,
-    dailyTrades: number
+    dailyTrades: number,
+    date: string // [FIX] Require date
 ): void {
     try {
         const state = {
-            positions: Array.from(positions.entries()), // Convert Map to Array for JSON
+            positions: Array.from(positions.entries()),
             dailyPnL,
             dailyTrades,
-            lastUpdated: Date.now()
+            lastUpdated: Date.now(),
+            date
         };
         fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
     } catch (error) {
@@ -52,7 +55,8 @@ export function loadRiskState(): RiskState | null {
             positions: new Map(state.positions),
             dailyPnL: state.dailyPnL,
             dailyTrades: state.dailyTrades,
-            lastUpdated: state.lastUpdated
+            lastUpdated: state.lastUpdated,
+            date: state.date || new Date().toISOString().split('T')[0] // Fallback for old files
         };
 
     } catch (error) {

@@ -1,5 +1,5 @@
 import { ExchangeConnector } from '../core/ExchangeConnector.js';
-import { config } from '../config/index.js';
+// import { config } from '../config/index.js';
 import { tradeLogger as logger } from '../utils/logger.js';
 
 async function emergencyCloseAll() {

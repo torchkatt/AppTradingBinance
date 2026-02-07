@@ -4,6 +4,13 @@ import { Position, Trade } from '../types/index.js';
 import type { ExchangeConnector } from './ExchangeConnector.js';
 import type { CapitalManager } from './CapitalManager.js';
 import { saveRiskState, loadRiskState } from './RiskStatePersistence.js';
+
+// Definición de Grupos de Correlación
+const CORRELATION_GROUPS: Record<string, string[]> = {
+    GROUP_A: ['BTC', 'ETH', 'SOL', 'BNB', 'AVAX', 'ADA', 'XRP', 'DOT', 'LTC'], // Majors (Alta correlación)
+    GROUP_B: ['DOGE', 'SHIB', 'PEPE', 'FLOKI'], // Memes (Alta volatilidad propia)
+    GROUP_C: ['OTHERS'] // Resto del mercado
+};
 /**
  * Sistema de gestión de riesgo multinivel con circuit breakers
  * 
@@ -21,6 +28,10 @@ export class RiskManager {
     private accountBalance: number = 0;
     private exchange: ExchangeConnector;
     private capitalManager?: CapitalManager;
+
+    // v4.0 Streak Control
+    private consecutiveLosses: number = 0;
+    private cooldownUntil: number = 0;
     constructor(initialBalance: number, exchange: ExchangeConnector, capitalManager?: CapitalManager) {
         this.accountBalance = initialBalance;
         this.exchange = exchange;
@@ -44,7 +55,9 @@ export class RiskManager {
             this.openPositions = savedState.positions;
             this.dailyPnL = savedState.dailyPnL;
             this.dailyTrades = savedState.dailyTrades;
-            // Recalcular reset diario por si acaso
+            this.lastResetDate = savedState.date; // [FIX] Restore date from file
+
+            // Recalcular reset diario
             this.checkDailyReset();
             logger.info({
                 restoredPositions: this.openPositions.size,
@@ -85,12 +98,39 @@ export class RiskManager {
         // AUNQUE el riesgo sea mayor al 1%, el usuario pidió 10x leverage en TODAS las operaciones.
         let positionSize = leverageBasedSize;
 
-        // Límite de seguridad: Nunca más del capital balance total * leverage total
+        // Límite de seguridad: Nunca exceder el apalancamiento máximo asignado
         const absoluteMaxSize = (balance * config.DEFAULT_LEVERAGE) / entryPrice;
-        positionSize = Math.min(positionSize, absoluteMaxSize);
+        positionSize = Math.min(positionSize, leverageBasedSize, absoluteMaxSize);
+
+        logger.info({
+            entryPrice,
+            stopLossPrice,
+            riskAmount,
+            riskPerUnit,
+            riskBasedSize,
+            leverageBasedSize,
+            finalSize: positionSize,
+            symbol
+        }, 'Calculated Position Size (Risk First)');
 
         // Redondear al paso del exchange
         const roundedSize = this.roundToStepSize(positionSize, symbol);
+
+        // [FIX] Validar Valor Nocional Mínimo (Min Order Value)
+        // Binance requiere min $5. Usamos $6 para evitar rechazos por fluctuación.
+        const notionalValue = roundedSize * entryPrice;
+        const MIN_NOTIONAL = 6.0;
+
+        if (notionalValue < MIN_NOTIONAL) {
+            logger.warn({
+                symbol,
+                notionalValue,
+                MIN_NOTIONAL,
+                roundedSize,
+                entryPrice
+            }, '⚠️ Position size too small (below Min Notional). Scaling up not possible without risking too much. SKIPPING.');
+            return 0; // Rechazar entrada si es muy pequeña
+        }
 
         logger.info({
             entryPrice,
@@ -99,6 +139,7 @@ export class RiskManager {
             leverageBasedSize,
             finalSize: positionSize,
             roundedSize,
+            notionalValue,
             symbol,
             leverage: config.DEFAULT_LEVERAGE
         }, 'Position size calculated (Fixed Leverage Mode)');
@@ -131,23 +172,85 @@ export class RiskManager {
             rounded = Math.floor(rounded);
         }
         // Asegurar que cumple con el mínimo
-        const finalQty = Math.max(rounded, minQty);
-        logger.debug({
-            symbol,
-            requestedQty: quantity,
-            stepSize,
-            minQty,
-            rounded,
-            finalQty
-        }, 'Quantity rounded using dynamic limits');
+        let finalQty = Math.max(rounded, minQty);
+
+        // [FIX] Validar Min Notional (Valor Mínimo en USD)
+        // Binance Futures suele requerir ~$5 USD. Usamos $6 de buffer.
+        // const minNotional = limits.minNotional || 5.0; // Default 5 si no hay info
+        // Necesitamos el precio entry para validar (pero aquí no lo tenemos exacto, usamos el limits si es posible? no, el roundToStepSize no tiene precio).
+        // Modificación: roundToStepSize debería recibir precio o validar fuera.
+        // Como roundToStepSize es privado y solo llamado de calculatePositionSize, 
+        // mejor validamos el Notional Value en calculatePositionSize que SÍ tiene el precio.
+
         return finalQty;
     }
+
+    /**
+     * Verifica si el símbolo está correlacionado con alguna posición abierta
+     */
+    private isCorrelated(newSymbol: string): boolean {
+        // Encontrar grupo del nuevo símbolo
+        const newAssetBase = newSymbol.split('/')[0];
+        let newGroup = 'GROUP_C';
+
+        for (const [groupName, assets] of Object.entries(CORRELATION_GROUPS)) {
+            if (assets.includes(newAssetBase)) {
+                newGroup = groupName;
+                break;
+            }
+        }
+
+        // Si es de "OTHERS", asumimos no correlación directa (simplificación)
+        if (newGroup === 'GROUP_C') return false;
+
+        // Verificar contra posiciones abiertas
+        for (const [openSymbol] of this.openPositions) {
+            const openAssetBase = openSymbol.split('/')[0];
+            let openGroup = 'GROUP_C';
+
+            for (const [groupName, assets] of Object.entries(CORRELATION_GROUPS)) {
+                if (assets.includes(openAssetBase)) {
+                    openGroup = groupName;
+                    break;
+                }
+            }
+
+            // Si ambos son del mismo grupo (y no son OTHERS), hay correlación
+            if (openGroup === newGroup && newGroup !== 'GROUP_C') {
+                logger.warn({
+                    newSymbol,
+                    correlatedWith: openSymbol,
+                    group: newGroup
+                }, '🚫 Trade rejected due to CORRELATION rule');
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /**
      * Verifica si se puede abrir una nueva posición
      * Implementa múltiples circuit breakers
      */
     canOpenPosition(symbol: string): { allowed: boolean; reason?: string } {
         this.checkDailyReset();
+
+        // Circuit Breaker #0: Cooldown por racha negativa (v4.0)
+        if (Date.now() < this.cooldownUntil) {
+            const minutesLeft = Math.ceil((this.cooldownUntil - Date.now()) / 60000);
+            const reason = `❄️ COOLDOWN ACTIVO: Esperando ${minutesLeft} min tras ${this.consecutiveLosses} pérdidas seguidas.`;
+            logger.warn({ cooldownUntil: this.cooldownUntil, minutesLeft }, reason);
+            return { allowed: false, reason };
+        }
+
+        // Circuit Breaker #0.5: Meta Diaria Alcanzada (Take Profit Diario)
+        if (this.isDailyGoalReached()) {
+            const reason = `🎯 META DIARIA ALCANZADA: ${(config.MAX_DAILY_PROFIT_PCT * 100).toFixed(1)}% Profit. Bot descansando.`;
+            logger.info({ dailyPnL: this.dailyPnL }, reason);
+            return { allowed: false, reason };
+        }
+
         // Circuit Breaker #1: Pérdida diaria máxima
         const dailyLossPct = this.dailyPnL / this.accountBalance;
         if (dailyLossPct <= -config.MAX_DAILY_LOSS_PCT) {
@@ -167,7 +270,12 @@ export class RiskManager {
             logger.warn({ symbol }, reason);
             return { allowed: false, reason };
         }
-        // Circuit Breaker #4: Número máximo de trades diarios
+        // Circuit Breaker #4: Correlación de Activos
+        if (this.isCorrelated(symbol)) {
+            const reason = `⚠️ Activo correlacionado con posición existente (Grupo idéntico)`;
+            return { allowed: false, reason };
+        }
+        // Circuit Breaker #5: Número máximo de trades diarios
         const MAX_DAILY_TRADES = 200; // Incrementado a 200 para estrategia de alta frecuencia
         if (this.dailyTrades >= MAX_DAILY_TRADES) {
             const reason = `⚠️ Número máximo de trades diarios alcanzado (${MAX_DAILY_TRADES})`;
@@ -190,7 +298,7 @@ export class RiskManager {
             openPositions: this.openPositions.size
         }, 'Position registered');
         // Persistir estado
-        saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades);
+        saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades, this.lastResetDate);
     }
     /**
      * Actualiza el stop loss de una posición (Trailing Stop)
@@ -208,11 +316,11 @@ export class RiskManager {
                 newStopLoss
             }, '🔄 Stop Loss updated (Trailing)');
             // Persistir estado
-            saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades);
+            saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades, this.lastResetDate);
         }
     }
     /**
-     * Cierra una posición y actualiza métricas de PnL
+     * Cierra una posición y actualiza métricas de PnL (Neto de Comisiones)
      */
     closePosition(symbol: string, exitPrice: number): Trade | null {
         const position = this.openPositions.get(symbol);
@@ -220,10 +328,24 @@ export class RiskManager {
             logger.error({ symbol }, 'Attempted to close non-existent position');
             return null;
         }
-        const pnl = this.calculatePnL(position, exitPrice);
-        const pnlPercent = (pnl / (position.entryPrice * position.quantity)) * 100;
-        this.dailyPnL += pnl;
-        this.accountBalance += pnl;
+
+        // 1. Calcular PnL Bruto
+        const grossPnL = this.calculatePnL(position, exitPrice);
+
+        // 2. Calcular Comisiones Estimadas (Entry + Exit)
+        // Fee = Notional Value * Fee Rate
+        const entryFee = (position.entryPrice * position.quantity) * config.ESTIMATED_FEE_PCT;
+        const exitFee = (exitPrice * position.quantity) * config.ESTIMATED_FEE_PCT;
+        const totalFee = entryFee + exitFee;
+
+        // 3. Calcular PnL Neto
+        const netPnL = grossPnL - totalFee;
+
+        const pnlPercent = (netPnL / (position.entryPrice * position.quantity)) * 100;
+
+        this.dailyPnL += netPnL; // Acumular PnL NETO
+        this.accountBalance += netPnL; // Actualizar Balance con lo real
+
         const trade: Trade = {
             symbol,
             side: position.side,
@@ -232,25 +354,69 @@ export class RiskManager {
             entryPrice: position.entryPrice,
             exitPrice,
             quantity: position.quantity,
-            pnl,
+            pnl: netPnL, // Guardar Neto
             pnlPercent,
         };
         this.openPositions.delete(symbol);
-        const emoji = pnl > 0 ? '✅' : '❌';
+        const emoji = netPnL > 0 ? '✅' : '❌';
+
+        // v4.0 Streak Logic relies on Net PnL now
+        if (netPnL < 0) {
+            this.consecutiveLosses++;
+            logger.warn({ consecutiveLosses: this.consecutiveLosses }, '📉 Consecutive Loss recorded');
+            if (this.consecutiveLosses >= config.MAX_CONSECUTIVE_LOSSES) {
+                this.cooldownUntil = Date.now() + config.COOLDOWN_TIME_MS;
+                logger.warn({
+                    consecutiveLosses: this.consecutiveLosses,
+                    cooldownMinutes: config.COOLDOWN_TIME_MS / 60000
+                }, '❄️ MAX CONSECUTIVE LOSSES REACHED -> TRIGGERING COOLDOWN');
+            }
+        } else {
+            // Reset streak on win
+            if (this.consecutiveLosses > 0) {
+                logger.info({ previousStreak: this.consecutiveLosses }, '🔁 Winning trade resets consecutive loss streak');
+            }
+            this.consecutiveLosses = 0;
+        }
+
         logger.info({
             symbol,
-            pnl,
+            grossPnL,
+            totalFee,
+            netPnL,
             pnlPercent,
             dailyPnL: this.dailyPnL,
             balance: this.accountBalance,
-            openPositions: this.openPositions.size
-        }, `${emoji} Position closed`);
+            openPositions: this.openPositions.size,
+            consecutiveLosses: this.consecutiveLosses
+        }, `${emoji} Position closed (Fee Adjusted)`);
+
         // Persistir estado
-        saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades);
+        saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades, this.lastResetDate);
         return trade;
     }
+
     /**
-     * Calcula el PnL de una posición
+     * Verifica si se ha alcanzado la meta diaria de ganancia (15%)
+     */
+    isDailyGoalReached(): boolean {
+        // Evitar división por cero
+        if (this.accountBalance === 0) return false;
+
+        // const currentProfitPct = this.dailyPnL / (this.accountBalance - this.dailyPnL); // Profit sobre Capital Inicial del día (estimado)
+        // O más simple: PnL / Balance Actual (conservador)
+        // Usemos config.INITIAL_BALANCE o calculemos el balance de inicio del día si es posible.
+        // Por simplicidad usaremos Balance Actual como base, lo cual es conservador si vamos ganando.
+        // O mejor: Profit / (Balance - Profit) aprox = ROI del día.
+
+        const startDayBalance = this.accountBalance - this.dailyPnL;
+        const roi = startDayBalance > 0 ? this.dailyPnL / startDayBalance : 0;
+
+        return roi >= config.MAX_DAILY_PROFIT_PCT;
+    }
+
+    /**
+     * Calcula el PnL de una posición (Bruto)
      */
     private calculatePnL(position: Position, exitPrice: number): number {
         const multiplier = position.side === 'long' ? 1 : -1;
@@ -272,7 +438,7 @@ export class RiskManager {
             this.dailyTrades = 0;
             this.lastResetDate = today;
             // Persistir estado (nuevo día)
-            saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades);
+            saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades, this.lastResetDate);
         }
     }
     /**
@@ -288,6 +454,13 @@ export class RiskManager {
             positions: Array.from(this.openPositions.values()),
             date: this.lastResetDate,
         };
+    }
+
+    /**
+     * Obtiene una posición específica por símbolo
+     */
+    getPosition(symbol: string): Position | undefined {
+        return this.openPositions.get(symbol);
     }
     /**
      * Actualiza el balance de la cuenta (para sincronización con exchange)

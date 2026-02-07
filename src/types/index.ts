@@ -34,6 +34,7 @@ export interface Trade {
     quantity: number;
     pnl?: number;
     pnlPercent?: number;
+    commission?: number; // Total fee paid (entry + exit)
     strategy?: string;
     metadata?: Record<string, any>;
 }

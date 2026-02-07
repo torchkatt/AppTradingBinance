@@ -7,9 +7,10 @@ export class TrendMomentumStrategy extends Strategy {
     description = 'Estrategia de seguimiento de tendencia basada en EMA 20/200 y volumen (Cardona Style)';
 
     constructor(
-        private fastEmaPeriod: number = 20,    // La "20" de Cardona
-        private slowEmaPeriod: number = 200,   // Tendencia largo plazo
-        private volMultiplier: number = 1.2    // 120% volumen promedio
+        private fastEmaPeriod: number = 20,
+        private slowEmaPeriod: number = 200,
+        private volMultiplier: number = 1.2,
+        private aggressiveMode: boolean = true // Semi-Aggressive by default as requested
     ) {
         super();
     }
@@ -26,7 +27,7 @@ export class TrendMomentumStrategy extends Strategy {
         // data[length-2] es la última vela cerrada (Signal Candle)
         const signalBar = data[data.length - 2];
         const prevBar = data[data.length - 3];
-        const prePrevBar = data[data.length - 4]; // Para detectar consolidación
+        // prePrevBar removed as it was unused
 
         // 1. Calcular Indicadores (sobre todos los datos, pero usamos índices correctos)
         const ema20 = EMA.calculate({ period: this.fastEmaPeriod, values: closes });
@@ -53,41 +54,44 @@ export class TrendMomentumStrategy extends Strategy {
         // Revisar bandwidth de las velas ANTERIORES a la señal (Pre-Squeeze)
         // Queremos que prevBar o prePrevBar hayan tenido volatilidad baja
         const bwPrev = bb[bb.length - 3].bandwidth;
-        const bwPrePrev = bb[bb.length - 4].bandwidth;
+        // bwPrePrev removed as it was unused
         // Threshold de Squeeze: Ancho de banda bajo (ej. < 0.05 o relativo)
         // Simplicidad: Si el ancho era menora un umbral, estaba "apretado"
         // NOTA: Para crypto, un bandwidth fijo es difícil. Mejor ver si se expandió.
         const bwSignal = bb[bb.length - 2].bandwidth;
-        const isExpasion = bwSignal > bwPrev; // ¿Se están abriendo las bandas?
+        const isExplosion = bwSignal > bwPrev;
 
-        // 2. Determinar Tendencia General
+        // 2. Determinar Tendencia General (Re-added)
         const isBullishTrend = valEma20 > valEma200;
         const isBearishTrend = valEma20 < valEma200;
 
-        // 3. Validar Volumen (Explosión)
-        // La vela de señal debe tener volumen superior al promedio
-        const isVolumeHigh = signalBar.volume > (valAvgVol * this.volMultiplier);
+        // 3. Validar Volumen
+        const effectiveVolMult = this.aggressiveMode ? 1.0 : this.volMultiplier;
+        const isVolumeOk = signalBar.volume > (valAvgVol * effectiveVolMult);
 
-        // 4. Lógica de Entrada (Breakout + Expansion)
+        // 4. Lógica de Entrada
+        const requireExpansion = this.aggressiveMode ? false : true;
+        const isStructureOk = requireExpansion ? isExplosion : true;
 
         // LONG SIGNAL
         if (isBullishTrend &&
             signalBar.close > valEma20 &&
-            prevBar.close <= valEma20 && // Cruce hacia arriba reciente
-            isVolumeHigh &&
-            isExpasion // Confirmamos que salimos de una contracción
+            (
+                prevBar.close <= valEma20 || // 1. Normal Crossover
+                (this.aggressiveMode && signalBar.close > signalBar.open) // 2. Aggressive: Just a Green Candle above EMA20
+            ) &&
+            isVolumeOk &&
+            isStructureOk
         ) {
             return {
                 type: 'long',
-                confidence: 0.85, // Alta confianza por Squeeze
-                stopLoss: signalBar.low * 0.99, // SL debajo de la vela de ruptura
-                takeProfit: signalBar.close * 1.04, // 4% TP
+                confidence: this.aggressiveMode ? 0.6 : 0.85,
+                stopLoss: signalBar.low * 0.99,
+                takeProfit: signalBar.close * 1.04,
                 metadata: {
-                    reason: 'Bullish Breakout (Squeeze Release)',
+                    reason: this.aggressiveMode ? 'Trend Re-Entry (Aggressive)' : 'Bullish Breakout (Squeeze)',
                     ema20: valEma20,
-                    ema200: valEma200,
-                    volumeRatio: (signalBar.volume / valAvgVol).toFixed(2),
-                    expansion: true
+                    ema200: valEma200
                 }
             };
         }
@@ -95,21 +99,22 @@ export class TrendMomentumStrategy extends Strategy {
         // SHORT SIGNAL
         if (isBearishTrend &&
             signalBar.close < valEma20 &&
-            prevBar.close >= valEma20 && // Cruce hacia abajo
-            isVolumeHigh &&
-            isExpasion
+            (
+                prevBar.close >= valEma20 || // 1. Normal Crossover
+                (this.aggressiveMode && signalBar.close < signalBar.open) // 2. Aggressive: Just a Red Candle below EMA20
+            ) &&
+            isVolumeOk &&
+            isStructureOk
         ) {
             return {
                 type: 'short',
-                confidence: 0.85,
-                stopLoss: signalBar.high * 1.01, // SL arriba de la vela
+                confidence: this.aggressiveMode ? 0.6 : 0.85,
+                stopLoss: signalBar.high * 1.01,
                 takeProfit: signalBar.close * 0.96,
                 metadata: {
-                    reason: 'Bearish Breakout (Squeeze Release)',
+                    reason: this.aggressiveMode ? 'Trend Push (Semi-Aggressive)' : 'Bearish Breakout (Squeeze)',
                     ema20: valEma20,
-                    ema200: valEma200,
-                    volumeRatio: (signalBar.volume / valAvgVol).toFixed(2),
-                    expansion: true
+                    ema200: valEma200
                 }
             };
         }

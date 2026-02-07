@@ -1,42 +1,42 @@
 import { ExchangeConnector } from '../core/ExchangeConnector.js';
-import { MeanReversionStrategy } from '../strategies/MeanReversionStrategy.js';
+import { TrendMomentumStrategy } from '../strategies/TrendMomentumStrategy.js';
 import { config } from '../config/index.js';
-import { tradeLogger as logger } from '../utils/logger.js';
+// import { tradeLogger as logger } from '../utils/logger.js';
 
 async function analyzeCurrentMarket() {
-    console.log('\n🔍 --- ANÁLISIS DE MERCADO EN TIEMPO REAL ---');
+    console.log('\n🔍 --- ANÁLISIS DE TENDENCIAS (CARDONA STYLE) ---');
     console.log(`Timeframe: ${config.TIMEFRAME} | Symbols: ${config.SYMBOLS.length}\n`);
 
     const exchange = new ExchangeConnector();
-    const strategy = new MeanReversionStrategy();
+    const strategy = new TrendMomentumStrategy(); // Usamos la nueva estrategia
 
-    // Configuración para simular el bot
     const results = [];
 
     for (const symbol of config.SYMBOLS) {
         try {
-            const ohlcv = await exchange.fetchOHLCV(symbol, config.TIMEFRAME, undefined, 200);
+            const ohlcv = await exchange.fetchOHLCV(symbol, config.TIMEFRAME, undefined, 300); // Más data para EMA200
             const signal = await strategy.analyze(ohlcv);
 
-            // Extraer métricas (necesitamos acceder a las métricas internas de la estrategia)
-            // Para este script, usaremos un truco: la estrategia MeanReversion guarda los últimos valores si la modificamos, 
-            // pero como no queremos tocarla, sacaremos los datos manualmente aquí.
-
             const closes = ohlcv.map(c => c.close);
-            const rsi = (strategy as any).getRSI(closes, 14).pop();
-            const bb = (strategy as any).getBollingerBands(closes, 20, 2).pop();
-            const ema200 = (strategy as any).getEMA(closes, 200).pop() || 0;
-            const currentPrice = closes[closes.length - 1];
+            const volumes = ohlcv.map(c => c.volume);
 
-            const percentB = bb ? (currentPrice - bb.lower) / (bb.upper - bb.lower) : 0;
+            // Recalcular indicadores para mostrar info (La estrategia ya los calculó internamente)
+            const ema20 = (strategy as any).getEMA(closes, 20).pop();
+            const ema200 = (strategy as any).getEMA(closes, 200).pop();
+            const currentPrice = closes[closes.length - 1];
+            const currentVol = volumes[volumes.length - 1];
+            const avgVol = (strategy as any).getSMA(volumes, 20).pop();
+
             const trend = currentPrice > ema200 ? 'ALCISTA 🟢' : 'BAJISTA 🔴';
+            const momentum = currentPrice > ema20 ? 'BULL' : 'BEAR';
+            const volStatus = currentVol > (avgVol * 1.2) ? 'ALTO 🔥' : 'NORMAL';
 
             results.push({
                 symbol,
                 price: currentPrice.toFixed(4),
-                rsi: rsi?.toFixed(2),
-                percentB: percentB.toFixed(3),
                 trend,
+                momentum,
+                vol: volStatus,
                 signal: signal ? signal.type.toUpperCase() : 'ESPERANDO'
             });
 
@@ -46,19 +46,8 @@ async function analyzeCurrentMarket() {
     }
 
     console.table(results);
-
-    // Recomendación general
-    const oversold = results.filter(r => parseFloat(r.rsi || '50') < 35).length;
-    const overbought = results.filter(r => parseFloat(r.rsi || '50') > 65).length;
-
-    console.log('\n💡 RESUMEN ESTRATÉGICO:');
-    if (oversold > 0) {
-        console.log(`✅ Hay ${oversold} monedas cerca de SOBREVENTA. Buen momento para Mean Reversion LONG.`);
-    } else if (overbought > 0) {
-        console.log(`✅ Hay ${overbought} monedas cerca de SOBRECOMPRA. Buen momento para Mean Reversion SHORT.`);
-    } else {
-        console.log('⚖️ El mercado está en equilibrio. Paciencia, no hay señales claras de reversión ahora.');
-    }
+    console.log('\n💡 ESTADO DEL SURFISTA:');
+    console.log('El bot está buscando "Rompus de Squeeze" a favor de la tendencia (EMA200).');
 }
 
 analyzeCurrentMarket();

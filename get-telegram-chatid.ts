@@ -6,7 +6,7 @@
  * 2. Ejecuta: npx tsx get-telegram-chatid.ts
  */
 
-const BOT_TOKEN = '8558173291:AAF73NaOlp-eE2e85VoueHKn64Bp1jHO078';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_TOKEN_HERE';
 
 async function getChatId() {
     console.log('🔍 Buscando mensajes en tu bot...\n');

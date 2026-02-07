@@ -4,6 +4,7 @@ import { RiskManager } from './core/RiskManager.js';
 import { ExchangeConnector } from './core/ExchangeConnector.js';
 import { TradingBot } from './core/TradingBot.js';
 import { MeanReversionStrategy } from './strategies/MeanReversionStrategy.js';
+import { TrendMomentumStrategy } from './strategies/TrendMomentumStrategy.js';
 import { TelegramNotifier } from './monitoring/TelegramNotifier.js';
 import { db } from './database/index.js';
 
@@ -17,12 +18,13 @@ class TradingSystem {
     private riskManager!: RiskManager;
     private tradingBot!: TradingBot;
     private notifier: TelegramNotifier;
-    private strategies: MeanReversionStrategy[];
+    private strategies: (MeanReversionStrategy | TrendMomentumStrategy)[];
 
     constructor() {
         // Crear estrategias
         this.strategies = [
-            new MeanReversionStrategy(),
+            // new MeanReversionStrategy(), // Desactivado por solicitud de usuario (quiere seguir tendencia)
+            new TrendMomentumStrategy(), // Activado: Estrategia Cardona (Tendencia + Squeeze)
         ];
 
         // Inicializar notificador

@@ -5,6 +5,7 @@ import { Strategy } from '../strategies/base/Strategy.js';
 import { db } from '../database/index.js';
 import { config } from '../config/index.js';
 import { tradeLogger as logger } from '../utils/logger.js';
+import { EMA, BollingerBands, ATR } from 'technicalindicators';
 import { OHLCV, Position } from '../types/index.js';
 import { Mutex } from 'async-mutex';
 /**
@@ -24,7 +25,7 @@ export class TradingBot {
     private strategies: Strategy[];
     private isRunning: boolean = false;
     private monitoringIntervals: Map<string, NodeJS.Timeout> = new Map();
-    private statusInterval: NodeJS.Timeout | null = null;
+    // private statusInterval: NodeJS.Timeout | null = null;
     private mutex: Mutex = new Mutex();
 
     constructor(
@@ -54,6 +55,13 @@ export class TradingBot {
         }
         // Iniciar monitoreo de alta frecuencia (1s) para TP/SL
         this.startFastMonitoring();
+        // Iniciar Housekeeping (Pruning de órdenes viejas)
+        this.startHousekeepingLoop();
+        // Iniciar Reporte Horario
+        this.startHourlyReporting();
+        // Iniciar Reporte Diario (Cada hora y al cierre)
+        this.startHourlyReporting();
+
         logger.info({
             symbols: config.SYMBOLS,
             strategies: this.strategies.map(s => s.name),
@@ -63,52 +71,126 @@ export class TradingBot {
         // Iniciar reporte periódico de estado (cada 1 minuto)
         this.startStatusReporting();
     }
+
+    /**
+     * Ciclo de mantenimiento global (Limpieza de órdenes, etc)
+     * Se ejecuta cada minuto, pero la limpieza respeta el TTL
+     */
+    private startHousekeepingLoop(): void {
+        const INTERVAL = 60000; // Revisar cada minuto
+        setInterval(async () => {
+            if (!this.isRunning) return;
+            await this.pruneStaleOrders();
+        }, INTERVAL);
+    }
+
+    /**
+     * Inicia reporte horario
+     */
+    private startHourlyReporting(): void {
+        const INTERVAL = 60 * 60 * 1000; // 1 Hora
+        setInterval(() => {
+            if (this.isRunning) {
+                this.sendDailyReport();
+            }
+        }, INTERVAL);
+    }
+
+    /**
+     * Genera y envía el reporte detallado
+     */
+    private async sendDailyReport(): Promise<void> {
+        const state = this.riskManager.getState();
+        // @ts-ignore - Agregamos el getter dinámicamente
+        const history = this.riskManager.getDailyHistory ? this.riskManager.getDailyHistory() : [];
+
+        // Calcular totales
+        let totalCommission = 0;
+        let largestWin = 0;
+        let largestLoss = 0;
+        let winningTrades = 0;
+        let losingTrades = 0;
+
+        for (const trade of history) {
+            if (trade.commission) totalCommission += trade.commission;
+            if (trade.pnl && trade.pnl > 0) {
+                winningTrades++;
+                if (trade.pnl > largestWin) largestWin = trade.pnl;
+            } else if (trade.pnl) {
+                losingTrades++;
+                if (trade.pnl < largestLoss) largestLoss = trade.pnl;
+            }
+        }
+
+        const winRate = history.length > 0 ? winningTrades / history.length : 0;
+
+        await this.notifier.sendDailyReport({
+            date: new Date().toLocaleDateString(),
+            totalTrades: history.length,
+            winningTrades,
+            losingTrades,
+            winRate,
+            totalPnl: state.dailyPnL,
+            pnlPercent: state.dailyPnLPercent || 0,
+            largestWin,
+            largestLoss,
+            totalCommission,
+            trades: history
+        });
+    }
+
+    /**
+     * Cancela órdenes pendientes viejas (TTL) para liberar capital
+     * Regla: Solo si NO hay posición abierta (para no borrar TP/SL)
+     */
+    private async pruneStaleOrders(): Promise<void> {
+        try {
+            // logger.info('🧹 Ejecutando limpieza de órdenes viejas (TTL)...');
+            // Nota: Iteramos por símbolos para asegurar compatibilidad
+            for (const symbol of config.SYMBOLS) {
+                // Verificar si tenemos posición activa
+                const position = this.riskManager.getPosition(symbol);
+                if (position) continue; // Si hay posición, no tocamos nada por seguridad.
+
+                const orders = await this.exchange.getOpenOrders(symbol);
+                const now = Date.now();
+                const ttlMs = config.ORDER_TTL_MINUTES * 60 * 1000;
+
+                for (const order of orders) {
+                    // Si la orden tiene más de TTL de antigüedad
+                    if ((now - order.timestamp) > ttlMs) {
+                        logger.warn({
+                            symbol,
+                            orderId: order.id,
+                            ageMin: ((now - order.timestamp) / 60000).toFixed(1)
+                        }, '🗑️ Orden expirada (TTL). Cancelando...');
+                        await this.exchange.cancelOrder(order.id, symbol);
+                    }
+                }
+            }
+        } catch (error) {
+            // Silencio errores leves, log solo si es grave
+            // logger.error({ error }, '❌ Error en Housekeeping');
+        }
+    }
     /**
      * Inicia el ciclo de reportes de estado
      */
     private startStatusReporting(): void {
-        // Reporte cada 60 segundos
-        const REPORT_INTERVAL = 60000;
-        this.statusInterval = setInterval(async () => {
-            if (!this.isRunning) return;
-            try {
-                const state = this.riskManager.getState();
-                const positions = [];
-                for (const pos of state.positions) {
-                    try {
-                        const currentPrice = await this.getCurrentPrice(pos.symbol);
-                        const pnl = pos.side === 'long'
-                            ? (currentPrice - pos.entryPrice) * pos.quantity
-                            : (pos.entryPrice - currentPrice) * pos.quantity;
-                        const pnlPercent = (pnl / (pos.entryPrice * pos.quantity)) * 100;
-                        positions.push({
-                            symbol: pos.symbol,
-                            side: pos.side,
-                            entryPrice: pos.entryPrice,
-                            currentPrice,
-                            quantity: pos.quantity,
-                            pnl,
-                            pnlPercent
-                        });
-                    } catch (error) {
-                        logger.error({ error, symbol: pos.symbol }, 'Failed to get price for status report');
-                    }
-                }
-                await this.notifier.sendPositionStatusReport({
-                    balance: state.accountBalance,
-                    dailyPnL: state.dailyPnL,
-                    positions
-                });
-            } catch (error) {
-                logger.error({ error }, 'Error in status reporting loop');
-            }
-        }, REPORT_INTERVAL);
-        logger.info('⏱️ Status reporting loop started (1m interval)');
+        // Reporte periódico deshabilitado temporalmente
+        // Se puede habilitar con un timer local si se necesita el reporte cada 60s
+        logger.info('⏱️ Status reporting available via Telegram commands');
     }
     /**
      * Configura comandos interactivos de Telegram
      */
     private setupTelegramCommands(): void {
+        // Comando /reporte (Nuevo Reporting Avanzado)
+        this.notifier.registerCommand('reporte', async () => {
+            await this.sendDailyReport();
+            return;
+        });
+
         // Comando /estado
         this.notifier.registerCommand('estado', async (bot, msg) => {
             const state = this.riskManager.getState();
@@ -249,6 +331,110 @@ export class TradingBot {
             await bot.sendMessage(msg.chat.id, pnlMsg, { parse_mode: 'HTML' });
             return;
         });
+
+        // Comando /analisis (Cardona Scanner)
+        this.notifier.registerCommand('analisis', async (bot, msg) => {
+            await bot.sendMessage(msg.chat.id, '🔍 <b>Analizando el mercado...</b>\n<i>Esto puede tomar unos segundos...</i>', { parse_mode: 'HTML' });
+
+            const results = [];
+            const symbols = config.SYMBOLS;
+
+            for (const symbol of symbols) {
+                try {
+                    // Fetch candles
+                    const candles = await this.exchange.fetchOHLCV(symbol, config.TIMEFRAME, undefined, 300);
+                    if (!candles || candles.length < 200) continue;
+
+                    const closes = candles.map(c => c.close);
+                    const currentPrice = closes[closes.length - 1];
+
+                    // EMA Trend
+                    const ema200 = EMA.calculate({ period: 200, values: closes }).pop() || 0;
+
+                    const isBullish = currentPrice > ema200;
+                    const trendIcon = isBullish ? '🟢' : '🔴';
+                    const trendText = isBullish ? 'ALCISTA' : 'BAJISTA';
+
+                    // Squeeze (Volatilidad)
+                    const bb = BollingerBands.calculate({ period: 20, stdDev: 2, values: closes });
+                    const lastBB = bb[bb.length - 1];
+                    const bandwidth = (lastBB.upper - lastBB.lower) / lastBB.middle;
+                    // Simple threshold for "squeeze" visualisation
+                    const squeezeIcon = bandwidth < 0.05 ? '💣' : '〰️';
+
+                    // Distance to EMA200
+                    const dist = ((currentPrice - ema200) / ema200) * 100;
+
+                    results.push(
+                        `<b>${symbol}</b> ${trendIcon}\n` +
+                        `   Trend: <b>${trendText}</b> (${dist > 0 ? '+' : ''}${dist.toFixed(2)}%)\n` +
+                        `   Vol: ${squeezeIcon} ${(bandwidth * 100).toFixed(2)}%`
+                    );
+
+                } catch (e) {
+                    logger.error({ error: e, symbol }, 'Error in telegram analysis');
+                }
+            }
+
+            const header = '🧠 <b>ANÁLISIS DE MERCADO (Cardona)</b>\n\n';
+            const footer = '\n💡 <i>Leyenda: 🔴/🟢 Tendencia, 💣 Squeeze, 🔥 Sobreactendido</i>';
+
+            // Split into chunks if too long
+            const report = results.join('\n\n');
+            await bot.sendMessage(msg.chat.id, header + report + footer, { parse_mode: 'HTML' });
+            return;
+        });
+
+        // Comando /apagar (Menú de opciones)
+        this.notifier.registerCommand('apagar', async (bot, msg) => {
+            const menu = [
+                '🛑 <b>¿CÓMO QUIERES APAGAR EL BOT?</b>',
+                '',
+                '1️⃣ <b>Cerrar TODO y Apagar</b>',
+                '   👉 Ejecuta: <code>/stop_close_all</code>',
+                '   <i>(Vende todas las posiciones a mercado y se desconecta)</i>',
+                '',
+                '2️⃣ <b>Solo Apagar (Mantener Posiciones)</b>',
+                '   👉 Ejecuta: <code>/stop_keep_positions</code>',
+                '   <i>(Deja las operaciones abiertas en Binance y se desconecta)</i>'
+            ].join('\n');
+            await bot.sendMessage(msg.chat.id, menu, { parse_mode: 'HTML' });
+        });
+
+        // Comando /stop_close_all (Panic Button)
+        this.notifier.registerCommand('stop_close_all', async (bot, msg) => {
+            await bot.sendMessage(msg.chat.id, '🧨 <b>CERRANDO TODAS LAS POSICIONES...</b>', { parse_mode: 'HTML' });
+            this.isRunning = false; // Stop monitoring first
+
+            const state = this.riskManager.getState();
+            for (const pos of state.positions) {
+                try {
+                    await this.closePosition(pos.symbol);
+                    await bot.sendMessage(msg.chat.id, `✅ Cerrado: ${pos.symbol}`);
+                } catch (e: any) {
+                    await bot.sendMessage(msg.chat.id, `❌ Error cerrando ${pos.symbol}: ${e.message}`);
+                }
+            }
+
+            await bot.sendMessage(msg.chat.id, '💀 <b>Bot Apagado (Positions Closed).</b> Bye!');
+            logger.info('🛑 Bot stopped via Telegram (Close All)');
+            process.exit(0);
+        });
+
+        // Comando /stop_keep_positions (Soft Stop)
+        this.notifier.registerCommand('stop_keep_positions', async (bot, msg) => {
+            await bot.sendMessage(msg.chat.id, '🛌 <b>Bot Apagado (Posiciones Abiertas).</b> Suerte!', { parse_mode: 'HTML' });
+            logger.info('🛑 Bot stopped via Telegram (Keep Positions)');
+            process.exit(0);
+        });
+
+        // Comando /reiniciar
+        this.notifier.registerCommand('reiniciar', async (bot, msg) => {
+            await bot.sendMessage(msg.chat.id, '🔄 <b>Reiniciando sistema...</b>\n<i>(Si no vuelve en 30s, inícialo manualmente)</i>', { parse_mode: 'HTML' });
+            logger.info('🔄 Bot restarting via Telegram request');
+            process.exit(1); // Exit 1 usually triggers restart in PM2/Docker
+        });
+
         logger.debug('Telegram interactive commands registered');
     }
     /**
@@ -279,8 +465,8 @@ export class TradingBot {
      */
     private async startMonitoring(symbol: string): Promise<void> {
         logger.info({ symbol }, 'Starting market monitoring');
-        // Calcular intervalo en milisegundos
-        const intervalMs = this.getIntervalMs(config.TIMEFRAME);
+        // Calcular intervalo en milisegundos (v4.0 uses fixed SCAN_INTERVAL_MS)
+        const intervalMs = config.SCAN_INTERVAL_MS;
         // Ejecutar análisis inmediato
         await this.analyzeAndTrade(symbol);
         // Configurar intervalo de monitoreo
@@ -312,6 +498,37 @@ export class TradingBot {
                 if (data.length < 50) {
                     logger.warn({ symbol, bars: data.length }, 'Not enough data for analysis');
                     return;
+                }
+
+                // [NUEVO] 1.5. Circuit Breaker de Volatilidad (Opción B del Usuario)
+                // Calcular ATR para detectar si el mercado está "muy agresivo"
+                const candlesATR = {
+                    high: data.map(c => c.high),
+                    low: data.map(c => c.low),
+                    close: data.map(c => c.close),
+                    period: 14,
+                };
+                const atrValues = ATR.calculate(candlesATR);
+
+                if (atrValues.length > 0) {
+                    const currentATR = atrValues[atrValues.length - 1];
+                    const currentPrice = data[data.length - 1].close;
+                    const atrPercent = currentATR / currentPrice;
+
+                    // Si el ATR% supera el máximo configurado (ej. 2%), abortamos entrada.
+                    // Esto evita operar durante mechas asesinas o crashes violentos.
+                    if (atrPercent > config.MAX_VOLATILITY_ATR_PCT) {
+                        logger.warn({
+                            symbol,
+                            currentATR,
+                            currentPrice,
+                            atrPercent: (atrPercent * 100).toFixed(2) + '%',
+                            limit: (config.MAX_VOLATILITY_ATR_PCT * 100).toFixed(2) + '%'
+                        }, '⛔ VOLATILITY ALERT: Market too volatile (Circuit Breaker). Skipping analysis.');
+
+                        // Opcional: Notificar usuario si es la primera vez que pasa en un rato (para evitar spam)
+                        return;
+                    }
                 }
 
                 // 2. Ejecutar cada estrategia
@@ -513,11 +730,11 @@ export class TradingBot {
         }
     }
     /**
-     * Inicia monitoreo de alta frecuencia (3s) para TP/SL
+     * Inicia monitoreo de alta frecuencia (5s) para TP/SL y Timeouts
      * Vital para scalping: detecta spikes de precio intra-vela
      */
     private startFastMonitoring(): void {
-        const FAST_INTERVAL = 1000; // 1 segundo (Turbo Mode)
+        const FAST_INTERVAL = config.POSITION_CHECK_INTERVAL_MS;
         setInterval(async () => {
             if (!this.isRunning) return;
             const state = this.riskManager.getState();
@@ -537,30 +754,54 @@ export class TradingBot {
         logger.info('🚀 Fast Execution Loop started (3s interval)');
     }
     /**
-     * Monitorea posiciones abiertas para verificar SL/TP
+     * Monitorea posiciones abiertas para verificar SL/TP y Meta Diaria
      */
     private async monitorOpenPositions(symbol: string, currentPrice: number): Promise<void> {
         const state = this.riskManager.getState();
         const position = state.positions.find(p => p.symbol === symbol);
         if (!position) return;
+
+        // [NUEVO] Lógica de Salida por Meta Diaria (Graceful Exit)
+        if (this.riskManager.isDailyGoalReached()) {
+            const closed = await this.manageDailyProfitExit(position, currentPrice);
+            if (closed) return; // Si se cerró, no seguir procesando
+        }
+
         let shouldClose = false;
         let reason = '';
+
+        // Timeout Check (v4.0)
+        const duration = Date.now() - position.timestamp;
+        const pnlPercentCurrent = position.side === 'long'
+            ? (currentPrice - position.entryPrice) / position.entryPrice
+            : (position.entryPrice - currentPrice) / position.entryPrice;
+
+        // Timeout: Close if max duration reached and not yet in profitable trailing zone
+        if (duration >= config.MAX_TRADE_DURATION_MS && pnlPercentCurrent < config.TRAILING_ACTIVATION_ROI) {
+            await this.closePosition(symbol); // Close immediately
+            await this.notifier.sendAlert('INFO', `⏳ Timeout reached for ${symbol}. Closing trade.`);
+            return;
+        }
+
         // Verificar Stop Loss
         if (position.stopLoss) {
             if (position.side === 'long') {
-                // [NUEVO] Lógica de Trailing Stop (LONG) - AJUSTADO PARA SCALPING
-                const pnlPercent = (currentPrice - position.entryPrice) / position.entryPrice;
-                // 1. Activación: Ganancia > 0.35% (Mitad del camino al 0.7% TP)
+                // [NUEVO] Lógica de Trailing Stop v4.0 (LONG)
+                const activationPriceChange = position.entryPrice * (config.TRAILING_ACTIVATION_ROI / config.DEFAULT_LEVERAGE); // e.g., 3% ROI / 10 = 0.3% Price
+                const lockPriceChange = position.entryPrice * (config.TRAILING_LOCK_ROI / config.DEFAULT_LEVERAGE); // e.g., 2.2% ROI / 10 = 0.22% Price
 
-                // 1. Activación: Ganancia > 0.15% (1.5% ROI) - GARANTIZA RENTABILIDAD
-                if (pnlPercent > 0.0015) {
-                    // Mover a Break-Even + 0.1% (cubrir comisiones 0.07% + ganancia)
-                    const breakEvenPlus = position.entryPrice * 1.001;
+                // 1. Activación: Ganancia > 3% ROI
+                if (currentPrice >= position.entryPrice + activationPriceChange) {
+                    // Mover SL a Lock Level (2.2% ROI)
+                    const lockLevel = position.entryPrice + lockPriceChange;
 
-                    // O mantener un Trailing del 0.05% de distancia (0.5% ROI)
-                    const trailingLevel = currentPrice * 0.9995; // 0.05% distancia
-                    // El nuevo SL debe ser el mayor de los dos
-                    let newStopLoss = Math.max(breakEvenPlus, trailingLevel);
+                    // Trailing dinámico: Mantener distancia de (Activation - Lock)
+                    const trailingDistance = activationPriceChange - lockPriceChange;
+                    const trailingLevel = currentPrice - trailingDistance;
+
+                    // El nuevo SL debe ser el mayor (Lock inicial vs Trailing dinámico)
+                    let newStopLoss = Math.max(lockLevel, trailingLevel);
+
                     // Solo actualizar si el nuevo SL es mayor que el actual
                     if (newStopLoss > position.stopLoss) {
                         this.riskManager.updatePositionStopLoss(symbol, newStopLoss);
@@ -574,17 +815,22 @@ export class TradingBot {
                     reason = 'Take Profit alcanzado';
                 }
             } else if (position.side === 'short') {
-                // [NUEVO] Lógica de Trailing Stop (SHORT) - AJUSTADO PARA SCALPING
-                const pnlPercent = (position.entryPrice - currentPrice) / position.entryPrice;
-                // 1. Activación: Ganancia > 0.35%
+                // [NUEVO] Lógica de Trailing Stop v4.0 (SHORT)
+                const activationPriceChange = position.entryPrice * (config.TRAILING_ACTIVATION_ROI / config.DEFAULT_LEVERAGE);
+                const lockPriceChange = position.entryPrice * (config.TRAILING_LOCK_ROI / config.DEFAULT_LEVERAGE);
 
-                // 1. Activación: Ganancia > 0.15% (1.5% ROI) - GARANTIZA RENTABILIDAD
-                if (pnlPercent > 0.0015) {
-                    // Break-Even - 0.1%
-                    const breakEvenPlus = position.entryPrice * 0.999;
-                    const trailingLevel = currentPrice * 1.0005; // 0.05% distancia
-                    // El nuevo SL debe ser el menor de los dos
-                    let newStopLoss = Math.min(breakEvenPlus, trailingLevel);
+                // 1. Activación: Ganancia > 3% ROI
+                if (currentPrice <= position.entryPrice - activationPriceChange) {
+                    // Mover SL a Lock Level 
+                    const lockLevel = position.entryPrice - lockPriceChange;
+
+                    // Trailing dinámico
+                    const trailingDistance = activationPriceChange - lockPriceChange;
+                    const trailingLevel = currentPrice + trailingDistance;
+
+                    // El nuevo SL debe ser el menor (Lock inicial vs Trailing dinámico)
+                    let newStopLoss = Math.min(lockLevel, trailingLevel);
+
                     // Solo actualizar si el nuevo SL es menor que el actual
                     if (newStopLoss < position.stopLoss) {
                         this.riskManager.updatePositionStopLoss(symbol, newStopLoss);
@@ -640,8 +886,41 @@ export class TradingBot {
                 const positions = await this.exchange.getOpenPositions(symbol);
                 for (const pos of positions) {
                     logger.info({ symbol, position: pos }, 'Recovered open position from exchange');
-                    // Check if we have local state for this position (to preserve SL/TP)
+
+                    // Check if we have local state for this position
                     const existing = existingPositions.get(symbol);
+
+                    // [RECOVERY] Attempt to recover SL/TP from Open Orders if local state is missing
+                    let recoveredSL = existing?.stopLoss;
+                    let recoveredTP = existing?.takeProfit;
+
+                    if (!recoveredSL) {
+                        try {
+                            const openOrders = await this.exchange.getOpenOrders(symbol);
+                            const slOrder = openOrders.find(o =>
+                                o.type === 'stop' ||
+                                o.type === 'stop_market' ||
+                                o.type === 'stop_loss' ||
+                                o.type === 'stop_loss_limit' ||
+                                (o.info && (o.info.stopPrice || o.info.triggerPrice))
+                            );
+
+                            if (slOrder) {
+                                recoveredSL = parseFloat(slOrder.stopPrice || slOrder.triggerPrice || slOrder.price);
+                                logger.info({ symbol, recoveredSL }, '✅ Recovered SL from Active Order');
+                            } else {
+                                // Fallback: Emergency SL based on Config (e.g. 2.5% ROI / 10x Lev = 0.25% Price)
+                                // Prevent loose 50% ROI stops.
+                                const sideMult = pos.side === 'long' ? 1 : -1;
+                                const emergencyRisk = (config.STOP_LOSS_ROI || 0.025) / config.DEFAULT_LEVERAGE;
+                                recoveredSL = pos.entryPrice * (1 - (sideMult * emergencyRisk));
+                                logger.warn({ symbol, newSL: recoveredSL, riskPct: (emergencyRisk * 100).toFixed(2) + '%' }, '⚠️ No SL found. Applied Tight Emergency SL from Config');
+                            }
+                        } catch (err) {
+                            logger.error({ symbol, err }, 'Failed to recover SL from orders');
+                        }
+                    }
+
                     // Registrar en RiskManager
                     const position: Position = {
                         symbol,
@@ -649,12 +928,13 @@ export class TradingBot {
                         entryPrice: pos.entryPrice,
                         quantity: pos.contracts,
                         timestamp: existing ? existing.timestamp : Date.now(),
-                        stopLoss: existing?.stopLoss,     // Preserve SL
-                        takeProfit: existing?.takeProfit, // Preserve TP
+                        stopLoss: recoveredSL,
+                        takeProfit: recoveredTP,
                     };
                     this.riskManager.registerPosition(position);
-                    if (existing) {
-                        logger.info({ symbol, sl: position.stopLoss, tp: position.takeProfit }, '✅ Restored SL/TP from local state');
+
+                    if (existing || recoveredSL) {
+                        logger.info({ symbol, sl: position.stopLoss, tp: position.takeProfit }, '✅ Position state restored');
                     }
                 }
             }
@@ -663,26 +943,52 @@ export class TradingBot {
         }
     }
     /**
+     * Gestiona la salida de posiciones cuando se alcanza la meta diaria
+     * Regla (Refinada por Usuario):
+     * - Pérdida > 0.5% (ej. -3%) -> ESPERAR (Dejar recuperar)
+     * - "Zona Segura" (Pérdida <= 0.5% o Ganancia) -> CERRAR
+     */
+    private async manageDailyProfitExit(position: Position, currentPrice: number): Promise<boolean> {
+        // Calcular PnL Neto Estimado
+        const grossPnL = position.side === 'long'
+            ? (currentPrice - position.entryPrice) * position.quantity
+            : (position.entryPrice - currentPrice) * position.quantity;
+
+        // Fee Estimado (Entry + Exit)
+        const fees = (position.entryPrice * position.quantity * config.ESTIMATED_FEE_PCT) +
+            (currentPrice * position.quantity * config.ESTIMATED_FEE_PCT);
+
+        const netPnL = grossPnL - fees;
+        const netPnLPercent = netPnL / (position.entryPrice * position.quantity);
+
+        // UMBRAL DE CORTE: -0.5%
+        // Si estamos MEJOR que -0.5% (ej. -0.4%, 0%, +10%), cerramos para asegurar el día.
+        if (netPnLPercent >= -0.005) {
+            logger.info({
+                symbol: position.symbol,
+                netPnLPercent: (netPnLPercent * 100).toFixed(2) + '%'
+            }, '🎯 Meta cumplida y posición en rango aceptable (>= -0.5%): CERRANDO.');
+            await this.closePosition(position.symbol, currentPrice);
+            return true;
+        }
+
+        // Si la pérdida es MAYOR a 0.5% (ej. -3%), NO cerramos.
+        // Esperamos a que recupere terreno (o que toque el Stop Loss normal del sistema).
+        logger.debug({
+            symbol: position.symbol,
+            netPnLPercent: (netPnLPercent * 100).toFixed(2) + '%'
+        }, '⏳ Meta cumplida pero pérdida alta (> 0.5%): Esperando recuperación...');
+
+        return false;
+    }
+
+    /**
      * Obtiene el precio actual de un símbolo
      */
     private async getCurrentPrice(symbol: string): Promise<number> {
         // [CORRECCIÓN] Usar el método wrapper que maneja Bybit Demo
         const ticker = await this.exchange.getTicker(symbol);
         return ticker?.last || 0;
-    }
-    /**
-     * Convierte timeframe a milisegundos
-     */
-    private getIntervalMs(timeframe: string): number {
-        const map: Record<string, number> = {
-            '1m': 60 * 1000,
-            '5m': 5 * 60 * 1000,
-            '15m': 15 * 60 * 1000,
-            '1h': 60 * 60 * 1000,
-            '4h': 4 * 60 * 60 * 1000,
-            '1d': 24 * 60 * 60 * 1000,
-        };
-        return map[timeframe] || 5 * 60 * 1000;
     }
     /**
      * Verifica si el bot está corriendo

@@ -21,6 +21,8 @@ interface DailyReport {
     pnlPercent: number;
     largestWin: number;
     largestLoss: number;
+    totalCommission?: number;
+    trades?: any[]; // Detailed trade history
 }
 /**
  * Sistema de notificaciones vía Telegram

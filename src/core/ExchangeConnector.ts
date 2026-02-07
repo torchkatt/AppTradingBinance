@@ -292,77 +292,29 @@ export class ExchangeConnector {
     }
 
     /**
-     * Crea una orden de mercado "Inteligente" usando LIMIT POST-ONLY para ahorrar comisiones (Maker)
-     * Si no se llena en unos segundos, re-intenta al nuevo precio.
+     * Crea una orden de mercado SIMPLE y CONFIABLE
+     * Ejecuta al instante al mejor precio disponible (Taker)
+     * Sin complicaciones de estado ni reintentos.
      */
     async createMarketOrder(symbol: string, side: 'buy' | 'sell', amount: number): Promise<any> {
         try {
-            logger.info({ symbol, side, amount }, '🚀 Iniciando ejecución de Orden Smart Limit (Maker)...');
+            logger.info({ symbol, side, amount }, '🚀 Ejecutando orden MARKET (garantía de ejecución)...');
 
-            const MAX_RETRIES = 3;
-            let currentRetry = 0;
+            // Orden market simple - Se ejecuta INSTANTÁNEAMENTE
+            const order = await this.exchange.createOrder(
+                symbol,
+                'market',
+                side,
+                amount
+            );
 
-            while (currentRetry < MAX_RETRIES) {
-                // 1. Obtener el mejor precio actual (Bid para Compra, Ask para Venta)
-                const ticker = await this.getTicker(symbol);
-                if (!ticker) throw new Error(`No se pudo obtener el ticker para ${symbol}`);
+            logger.info({
+                orderId: order.id,
+                price: order.average || order.price,
+                filled: order.filled
+            }, '✅ Orden MARKET ejecutada exitosamente');
 
-                // FALLBACK: Usar el mejor precio disponible (Bid/Ask) o el Precio Último
-                const targetPrice = side === 'buy' ? (ticker.bid || ticker.last) : (ticker.ask || ticker.last);
-
-                logger.info({
-                    symbol,
-                    side,
-                    targetPrice,
-                    retry: currentRetry + 1
-                }, '⏳ Colocando orden Limit Post-Only...');
-
-                try {
-                    // 2. Colocar orden Limit con Post-Only
-                    // Binance: timeInForce = 'GTX', Bybit: postOnly = true
-                    const params: any = { postOnly: true };
-                    if (config.EXCHANGE_NAME === 'binance') {
-                        params.timeInForce = 'GTX';
-                    }
-
-                    const order = await this.exchange.createOrder(
-                        symbol,
-                        'limit',
-                        side,
-                        amount,
-                        targetPrice,
-                        params
-                    );
-
-                    logger.info({ orderId: order.id, price: targetPrice }, '✅ Orden colocada en el libro. Esperando llenado...');
-
-                    // 3. Esperar un momento a que se llene (Maker orders no son instantáneas)
-                    await new Promise(resolve => setTimeout(resolve, 3000));
-
-                    // 4. Verificar estado
-                    const updatedOrder = await this.exchange.fetchOrder(order.id, symbol);
-
-                    if (updatedOrder.status === 'closed' || updatedOrder.status === 'filled') {
-                        logger.info({ orderId: order.id }, '🎊 Orden LLENADA con éxito (Maker Fee aplicada).');
-                        return updatedOrder;
-                    }
-
-                    // 5. Si no se llenó, cancelar e intentar de nuevo
-                    logger.warn({ orderId: order.id, status: updatedOrder.status }, '⚠️ Orden no llenada a tiempo. Cancelando y re-intentando...');
-                    await this.exchange.cancelOrder(order.id, symbol);
-                    currentRetry++;
-
-                } catch (e: any) {
-                    // Si el error es que el precio ya cambió y no se pudo poner Post-Only, re-intentamos
-                    logger.warn({ error: e.message }, '⚠️ Error al colocar Post-Only (posible cambio de precio). Re-intentando...');
-                    currentRetry++;
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                }
-            }
-
-            // 6. Fallback final: Si tras re-intentos falla, usamos market para no perder el trade (opcional)
-            logger.warn('🚨 Fallaron re-intentos Limit Maker. Usando Market Order como respaldo...');
-            return await this.exchange.createOrder(symbol, 'market', side, amount);
+            return order;
 
         } catch (error: any) {
             logger.error({
@@ -370,13 +322,14 @@ export class ExchangeConnector {
                 symbol,
                 side,
                 amount
-            }, '❌ Error crítico en ejecución de orden');
+            }, '❌ Error en ejecución de orden MARKET');
             throw error;
         }
     }
 
     /**
-     * Crea una orden con stop loss y take profit
+     * Crea una orden MARKET con stop loss y take profit opcionales
+     * SIMPLIFICADO: la orden principal es MARKET instantánea
      */
     async createOrderWithSLTP(
         symbol: string,
@@ -386,51 +339,60 @@ export class ExchangeConnector {
         takeProfit?: number
     ): Promise<any> {
         try {
-            // Crear orden principal
+            // 1. Crear orden MARKET principal (ejecución garantizada)
             const mainOrder = await this.createMarketOrder(symbol, side, amount);
 
-            // Crear stop loss si está especificado
+            logger.info({
+                orderId: mainOrder.id,
+                stopLoss,
+                takeProfit
+            }, 'Orden principal ejecutada. Colocando órdenes de protección...');
+
+            // 2. Crear Stop Loss si está especificado
             if (stopLoss) {
                 const slSide = side === 'buy' ? 'sell' : 'buy';
-                // CCXT for Binance requires 'stopPrice' in params (sometimes 'triggerPrice')
-                const params: any = {
-                    stopPrice: stopLoss,
-                    triggerPrice: stopLoss,
-                    reduceOnly: true
-                };
-                // Usamos 'stop' (Stop-Limit en Binance) para que aparezca en el libro y busque ser MAKER
-                await this.exchange.createOrder(
-                    symbol,
-                    'stop',
-                    slSide,
-                    amount,
-                    stopLoss, // Limit Price
-                    params
-                );
-                logger.debug({ stopLoss }, 'Stop loss order created');
+                try {
+                    await this.exchange.createOrder(
+                        symbol,
+                        'stop_market', // Stop Market = ejecuta al instante cuando toca el precio
+                        slSide,
+                        amount,
+                        undefined, // Sin limit price en stop_market
+                        {
+                            stopPrice: stopLoss,
+                            reduceOnly: true
+                        }
+                    );
+                    logger.info({ stopLoss }, '🛡️ Stop Loss colocado');
+                } catch (e: any) {
+                    logger.error({ error: e.message, stopLoss }, '❌ CRÍTICO: Fallo al colocar Stop Loss');
+                    // Continuar - la posición queda sin SL pero al menos está registrada
+                }
             }
 
-            // Crear take profit si está especificado
+            // 3. Crear Take Profit si está especificado
             if (takeProfit) {
                 const tpSide = side === 'buy' ? 'sell' : 'buy';
-                const params: any = {
-                    reduceOnly: true
-                };
-                // Usamos 'limit' en lugar de 'take_profit_market' para entrar como MAKER
-                await this.exchange.createOrder(
-                    symbol,
-                    'limit',
-                    tpSide,
-                    amount,
-                    takeProfit,
-                    params
-                );
-                logger.debug({ takeProfit }, 'Take profit order created');
+                try {
+                    await this.exchange.createOrder(
+                        symbol,
+                        'limit',
+                        tpSide,
+                        amount,
+                        takeProfit,
+                        { reduceOnly: true }
+                    );
+                    logger.info({ takeProfit }, '🎯 Take Profit colocado');
+                } catch (e: any) {
+                    logger.error({ error: e.message, takeProfit }, '⚠️ Fallo al colocar Take Profit');
+                    // Continuar - la posición queda sin TP pero el SL está activo
+                }
             }
 
             return mainOrder;
+
         } catch (error: any) {
-            logger.error({ error: error.message }, 'Failed to create order with SL/TP');
+            logger.error({ error: error.message }, 'Error al crear orden con SL/TP');
             throw error;
         }
     }
@@ -581,6 +543,35 @@ export class ExchangeConnector {
         } catch (error: any) {
             logger.warn({ error: error.message, symbol }, 'Failed to fetch ticker for spread check');
             return null;
+        }
+    }
+
+    /**
+     * Obtiene órdenes abiertas (pendientes)
+     */
+    async getOpenOrders(symbol?: string): Promise<any[]> {
+        try {
+            if (symbol) {
+                return await this.exchange.fetchOpenOrders(symbol);
+            } else {
+                return await this.exchange.fetchOpenOrders();
+            }
+        } catch (error) {
+            logger.error({ error, symbol }, 'Failed to fetch open orders');
+            return [];
+        }
+    }
+
+    /**
+     * Cancela una orden específica
+     */
+    async cancelOrder(id: string, symbol: string): Promise<void> {
+        try {
+            await this.exchange.cancelOrder(id, symbol);
+            logger.info({ id, symbol }, '🗑️ Order cancelled');
+        } catch (error) {
+            logger.error({ error, id, symbol }, 'Failed to cancel order');
+            throw error;
         }
     }
 
