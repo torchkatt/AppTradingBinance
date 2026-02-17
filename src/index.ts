@@ -37,14 +37,13 @@ class TradingSystem {
     async initialize(): Promise<void> {
         try {
             logger.info('');
-            logger.info('╔═══════════════════════════════════════════════════════════════╗');
-            logger.info('║       PROFESSIONAL TRADING SYSTEM                             ║');
-            logger.info('╚═══════════════════════════════════════════════════════════════╝');
-            logger.info('');
-            logger.info('🚀 Initializing Trading System...');
-            logger.info('');
+            // 1. Iniciar servidor API para dashboard INMEDIATAMENTE
+            // Esto permite cambiar la configuración si el bot se queda pegado inicializando
+            const { createApiServer } = await import('./api/server.js');
+            createApiServer(3005);
+            logger.info('🌐 API Server started on port 3005 (Boot mode)');
 
-            // 1. Inicializar base de datos
+            // 2. Inicializar base de datos
             await db.initialize();
             logger.info('✅ Database initialized');
 
@@ -89,7 +88,12 @@ class TradingSystem {
             );
             logger.info('✅ Trading Bot created');
 
-            // 7. Enviar notificación de inicio
+            // 7. Registrar bot en el API Provider
+            const { botProvider } = await import('./api/botProvider.js');
+            botProvider.setBot(this.tradingBot);
+            logger.info('✅ Bot registered in API Provider');
+
+            // 8. Enviar notificación de inicio
             await this.notifier.sendStartupMessage();
 
             logger.info('');

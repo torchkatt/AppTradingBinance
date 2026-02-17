@@ -32,6 +32,10 @@ export class Database {
         try {
             const client = await this.pool.connect();
             logger.info('✅ Database connection established');
+
+            // Migración: Añadir columna commission si no existe
+            await client.query('ALTER TABLE trades ADD COLUMN IF NOT EXISTS commission DECIMAL(20, 8);');
+
             client.release();
         } catch (error: any) {
             logger.warn({ error: error.message }, '⚠️ Could not connect to database. System will continue in OPTIONAL DATABASE mode (Results will only be shown in logs/Telegram)');
@@ -46,8 +50,8 @@ export class Database {
         const query = `
       INSERT INTO trades (
         symbol, side, entry_price, exit_price, quantity,
-        entry_time, exit_time, pnl, pnl_percent, strategy, metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        entry_time, exit_time, pnl, pnl_percent, strategy, metadata, commission
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING id
     `;
 
@@ -63,6 +67,7 @@ export class Database {
             trade.pnlPercent,
             trade.strategy,
             JSON.stringify(trade.metadata),
+            trade.commission || 0,
         ];
 
         try {
@@ -73,6 +78,37 @@ export class Database {
         } catch (error) {
             logger.error({ error, trade }, 'Failed to save trade');
             throw error;
+        }
+    }
+
+    /**
+     * Obtiene los últimos trades de la base de datos
+     */
+    async getRecentTrades(limit: number = 100): Promise<Trade[]> {
+        const query = `
+      SELECT id, symbol, side, entry_price as "entryPrice", exit_price as "exitPrice", 
+             quantity, entry_time as "entryTime", exit_time as "exitTime", 
+             pnl, pnl_percent as "pnlPercent", strategy, metadata, commission
+      FROM trades 
+      ORDER BY exit_time DESC NULLS LAST, entry_time DESC
+      LIMIT $1
+    `;
+
+        try {
+            const result = await this.pool.query(query, [limit]);
+            return result.rows.map(row => ({
+                ...row,
+                entryPrice: parseFloat(row.entryPrice),
+                exitPrice: row.exitPrice ? parseFloat(row.exitPrice) : null,
+                quantity: parseFloat(row.quantity),
+                pnl: row.pnl ? parseFloat(row.pnl) : null,
+                pnlPercent: row.pnlPercent ? parseFloat(row.pnlPercent) : null,
+                commission: row.commission ? parseFloat(row.commission) : 0,
+                metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata
+            }));
+        } catch (error) {
+            logger.error({ error }, 'Failed to get recent trades');
+            return [];
         }
     }
 

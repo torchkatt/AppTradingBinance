@@ -22,6 +22,8 @@ const CORRELATION_GROUPS: Record<string, string[]> = {
  */
 export class RiskManager {
     private dailyPnL: number = 0;
+    private allTimePnL: number = 0;
+    private unrealizedPnL: number = 0;
     private openPositions: Map<string, Position> = new Map();
     private lastResetDate: string = new Date().toISOString().split('T')[0];
     private dailyTrades: number = 0;
@@ -32,11 +34,39 @@ export class RiskManager {
     // v4.0 Streak Control
     private consecutiveLosses: number = 0;
     private cooldownUntil: number = 0;
+
+    // Track daily history for reporting
+    private tradesHistory: Trade[] = [];
+
+    // Track real exchange balance to calculate relative changes correctly (especially for OVERRIDE_CAPITAL)
+    private lastSyncedRealBalance: number = 0;
+
     constructor(initialBalance: number, exchange: ExchangeConnector, capitalManager?: CapitalManager) {
         this.accountBalance = initialBalance;
         this.exchange = exchange;
         this.capitalManager = capitalManager;
         logger.info({ initialBalance }, 'RiskManager initialized');
+    }
+
+    /**
+     * Obtiene el timestamp hasta cuándo está activo el cooldown
+     */
+    public getCooldownUntil(): number {
+        return this.cooldownUntil;
+    }
+
+    /**
+     * Obtiene el número de pérdidas consecutivas actuales
+     */
+    public getConsecutiveLosses(): number {
+        return this.consecutiveLosses;
+    }
+
+    /**
+     * Obtiene el historial de trades del día
+     */
+    public getDailyHistory(): Trade[] {
+        return this.tradesHistory;
     }
     /**
      * Obtiene el balance efectivo para cálculos de riesgo
@@ -68,17 +98,47 @@ export class RiskManager {
             this.checkDailyReset();
             logger.info('Iniciando estado de RiskManager limpio');
         }
-        logger.info({
-            dailyPnL: this.dailyPnL,
-            balance: this.accountBalance
-        }, 'RiskManager ready');
+
+        // Sincronizar balances reales iniciales y PnL histórico (SIEMPRE AL INICIAR)
+        try {
+            this.lastSyncedRealBalance = await this.exchange.syncBalance();
+            // Iniciar sincronización de PnL histórico en segundo plano para no bloquear el inicio
+            this.exchange.fetchAllTimePnL().then(pnl => {
+                this.allTimePnL = pnl;
+                logger.info({ allTimePnL: this.allTimePnL }, '✅ PnL Histórico cargado en segundo plano');
+            }).catch(err => {
+                logger.warn({ err: err.message }, '⚠️ Falló la carga de PnL Histórico en segundo plano');
+            });
+            this.unrealizedPnL = await this.exchange.getUnrealizedPnL();
+
+            // ✅ FORZAR sincronización de PnL diario con Binance (Fuente de verdad)
+            if (config.EXCHANGE_NAME === 'binance') {
+                const realDailyPnL = await (this.exchange as any).fetchDailyPnL();
+                logger.info({ localPnL: this.dailyPnL, binancePnL: realDailyPnL }, '📈 Calibrando PnL diario con Binance al iniciar');
+                this.dailyPnL = realDailyPnL;
+            }
+
+            logger.info({
+                lastSyncedRealBalance: this.lastSyncedRealBalance,
+                allTimePnL: this.allTimePnL,
+                unrealizedPnL: this.unrealizedPnL,
+                dailyPnL: this.dailyPnL,
+                balance: this.accountBalance
+            }, '📊 Sincronización inicial con Binance completada');
+        } catch (e) {
+            logger.warn('⚠️ No se pudo sincronizar balance o PnL inicial con Binance');
+            this.lastSyncedRealBalance = this.accountBalance;
+        }
+
+        logger.info('RiskManager ready');
     }
+
     /**
      * Calcula el tamaño de posición permitido basado en gestión de riesgo
      * 
      * Formula: Position Size = (Account Balance * Risk%) / Distance to Stop Loss
      */
-    calculatePositionSize(
+    public calculatePositionSize(
         entryPrice: number,
         stopLossPrice: number,
         symbol?: string
@@ -100,7 +160,7 @@ export class RiskManager {
 
         // Límite de seguridad: Nunca exceder el apalancamiento máximo asignado
         const absoluteMaxSize = (balance * config.DEFAULT_LEVERAGE) / entryPrice;
-        positionSize = Math.min(positionSize, leverageBasedSize, absoluteMaxSize);
+        positionSize = Math.min(leverageBasedSize, absoluteMaxSize);
 
         logger.info({
             entryPrice,
@@ -117,9 +177,9 @@ export class RiskManager {
         const roundedSize = this.roundToStepSize(positionSize, symbol);
 
         // [FIX] Validar Valor Nocional Mínimo (Min Order Value)
-        // Binance requiere min $5. Usamos $6 para evitar rechazos por fluctuación.
+        // Binance USDⓈ-M Futures requiere mínimo $10 USD
         const notionalValue = roundedSize * entryPrice;
-        const MIN_NOTIONAL = 6.0;
+        const MIN_NOTIONAL = 10.0;
 
         if (notionalValue < MIN_NOTIONAL) {
             logger.warn({
@@ -230,11 +290,58 @@ export class RiskManager {
     }
 
     /**
+     * 🚨 CRÍTICO: Calcula el PnL no realizado de posiciones abiertas
+     * Consulta precios actuales del exchange para calcular pérdidas/ganancias flotantes
+     */
+    async calculateUnrealizedPnL(): Promise<number> {
+        if (this.openPositions.size === 0) return 0;
+
+        let totalUnrealizedPnL = 0;
+
+        for (const [symbol, position] of this.openPositions) {
+            try {
+                // Obtener precio actual del exchange
+                const ticker = await this.exchange.getTicker(symbol);
+                const currentPrice = ticker.last;
+
+                if (!currentPrice) continue;
+
+                // Calcular PnL no realizado usando el método existente
+                const pnl = this.calculatePnL(position, currentPrice);
+                totalUnrealizedPnL += pnl;
+
+                logger.debug({
+                    symbol,
+                    entryPrice: position.entryPrice,
+                    currentPrice,
+                    unrealizedPnL: pnl
+                }, 'Position unrealized PnL');
+            } catch (error: any) {
+                logger.error({ symbol, error: error.message }, 'Failed to fetch price for unrealized PnL');
+            }
+        }
+
+        return totalUnrealizedPnL;
+    }
+
+    /**
      * Verifica si se puede abrir una nueva posición
      * Implementa múltiples circuit breakers
+     * 🚨 CRÍTICO: Ahora calcula PnL TOTAL (realizado + no realizado)
      */
-    canOpenPosition(symbol: string): { allowed: boolean; reason?: string } {
+    async canOpenPosition(symbol: string): Promise<{ allowed: boolean; reason?: string }> {
         this.checkDailyReset();
+
+        // 🚨 CRÍTICO: Calcular PnL TOTAL incluyendo pérdidas no realizadas
+        const unrealizedPnL = await this.calculateUnrealizedPnL();
+        const totalPnL = this.dailyPnL + unrealizedPnL;
+
+        logger.info({
+            realizedPnL: this.dailyPnL,
+            unrealizedPnL,
+            totalPnL,
+            openPositions: this.openPositions.size
+        }, '💰 PnL Check for Circuit Breakers');
 
         // Circuit Breaker #0: Cooldown por racha negativa (v4.0)
         if (Date.now() < this.cooldownUntil) {
@@ -247,17 +354,18 @@ export class RiskManager {
         // Circuit Breaker #0.5: Meta Diaria Alcanzada (Take Profit Diario)
         if (this.isDailyGoalReached()) {
             const reason = `🎯 META DIARIA ALCANZADA: ${(config.MAX_DAILY_PROFIT_PCT * 100).toFixed(1)}% Profit. Bot descansando.`;
-            logger.info({ dailyPnL: this.dailyPnL }, reason);
+            logger.info({ totalPnL }, reason);
             return { allowed: false, reason };
         }
 
-        // Circuit Breaker #1: Pérdida diaria máxima
-        const dailyLossPct = this.dailyPnL / this.accountBalance;
+        // 🚨 Circuit Breaker #1: Pérdida diaria máxima (CON PNL NO REALIZADO)
+        const dailyLossPct = totalPnL / this.accountBalance;
         if (dailyLossPct <= -config.MAX_DAILY_LOSS_PCT) {
-            const reason = `🔴 CIRCUIT BREAKER: Pérdida diaria de ${(dailyLossPct * 100).toFixed(2)}% alcanzada (límite: ${(config.MAX_DAILY_LOSS_PCT * 100).toFixed(2)}%)`;
-            logger.warn({ dailyPnL: this.dailyPnL, dailyLossPct }, reason);
+            const reason = `🔴 CIRCUIT BREAKER ACTIVO: Pérdida diaria de ${(dailyLossPct * 100).toFixed(2)}% alcanzada (límite: ${(config.MAX_DAILY_LOSS_PCT * 100).toFixed(2)}%). Total PnL: $${totalPnL.toFixed(2)} (Realizado: $${this.dailyPnL.toFixed(2)}, No Realizado: $${unrealizedPnL.toFixed(2)})`;
+            logger.warn({ dailyPnL: this.dailyPnL, unrealizedPnL, totalPnL, dailyLossPct }, reason);
             return { allowed: false, reason };
         }
+
         // Circuit Breaker #2: Número máximo de posiciones abiertas
         if (this.openPositions.size >= config.MAX_OPEN_POSITIONS) {
             const reason = `⚠️ Número máximo de posiciones abiertas alcanzado (${config.MAX_OPEN_POSITIONS})`;
@@ -276,7 +384,7 @@ export class RiskManager {
             return { allowed: false, reason };
         }
         // Circuit Breaker #5: Número máximo de trades diarios
-        const MAX_DAILY_TRADES = 200; // Incrementado a 200 para estrategia de alta frecuencia
+        const MAX_DAILY_TRADES = 30; // Realistic limit for small accounts to avoid overtrading
         if (this.dailyTrades >= MAX_DAILY_TRADES) {
             const reason = `⚠️ Número máximo de trades diarios alcanzado (${MAX_DAILY_TRADES})`;
             logger.warn({ dailyTrades: this.dailyTrades }, reason);
@@ -320,80 +428,119 @@ export class RiskManager {
         }
     }
     /**
-     * Cierra una posición y actualiza métricas de PnL (Neto de Comisiones)
+     * Cierra una posición y actualiza métricas de PnL usando datos reales del exchange
      */
-    closePosition(symbol: string, exitPrice: number): Trade | null {
+    async closePosition(symbol: string, exitPrice: number): Promise<Trade | null> {
         const position = this.openPositions.get(symbol);
         if (!position) {
             logger.error({ symbol }, 'Attempted to close non-existent position');
             return null;
         }
 
-        // 1. Calcular PnL Bruto
-        const grossPnL = this.calculatePnL(position, exitPrice);
+        try {
+            // ✅ USAR PnL REAL DE BINANCE
+            logger.info({ symbol }, '💰 Fetching real PnL from exchange...');
+            const exchangePnL = await this.exchange.getPositionPnL(symbol);
 
-        // 2. Calcular Comisiones Estimadas (Entry + Exit)
-        // Fee = Notional Value * Fee Rate
-        const entryFee = (position.entryPrice * position.quantity) * config.ESTIMATED_FEE_PCT;
-        const exitFee = (exitPrice * position.quantity) * config.ESTIMATED_FEE_PCT;
-        const totalFee = entryFee + exitFee;
+            // Si getPositionPnL falla o retorna 0, usar cálculo manual como fallback
+            let netPnL: number;
+            let pnlPercent: number;
+            let actualCommission: number;
 
-        // 3. Calcular PnL Neto
-        const netPnL = grossPnL - totalFee;
+            if (exchangePnL.realizedPnl !== 0 || exchangePnL.commission !== 0) {
+                // ✅ Usar valores reales de Binance
+                netPnL = exchangePnL.realizedPnl;
+                actualCommission = exchangePnL.commission;
+                pnlPercent = (netPnL / (position.entryPrice * position.quantity)) * 100;
 
-        const pnlPercent = (netPnL / (position.entryPrice * position.quantity)) * 100;
+                logger.info({
+                    symbol,
+                    realizedPnL: exchangePnL.realizedPnl,
+                    commission: exchangePnL.commission,
+                    netPnL,
+                    pnlPercent,
+                    source: 'BINANCE_API'
+                }, '✅ Using REAL PnL from Binance');
+            } else {
+                // ❌ Fallback: Cálculo manual (solo si exchange falla)
+                logger.warn({ symbol }, '⚠️ Exchange PnL unavailable, using manual calculation as fallback');
 
-        this.dailyPnL += netPnL; // Acumular PnL NETO
-        this.accountBalance += netPnL; // Actualizar Balance con lo real
+                const grossPnL = this.calculatePnL(position, exitPrice);
+                const entryFee = (position.entryPrice * position.quantity) * config.ESTIMATED_FEE_PCT;
+                const exitFee = (exitPrice * position.quantity) * config.ESTIMATED_FEE_PCT;
+                actualCommission = entryFee + exitFee;
+                netPnL = grossPnL - actualCommission;
+                pnlPercent = (netPnL / (position.entryPrice * position.quantity)) * 100;
 
-        const trade: Trade = {
-            symbol,
-            side: position.side,
-            entryTime: position.timestamp,
-            exitTime: Date.now(),
-            entryPrice: position.entryPrice,
-            exitPrice,
-            quantity: position.quantity,
-            pnl: netPnL, // Guardar Neto
-            pnlPercent,
-        };
-        this.openPositions.delete(symbol);
-        const emoji = netPnL > 0 ? '✅' : '❌';
-
-        // v4.0 Streak Logic relies on Net PnL now
-        if (netPnL < 0) {
-            this.consecutiveLosses++;
-            logger.warn({ consecutiveLosses: this.consecutiveLosses }, '📉 Consecutive Loss recorded');
-            if (this.consecutiveLosses >= config.MAX_CONSECUTIVE_LOSSES) {
-                this.cooldownUntil = Date.now() + config.COOLDOWN_TIME_MS;
                 logger.warn({
-                    consecutiveLosses: this.consecutiveLosses,
-                    cooldownMinutes: config.COOLDOWN_TIME_MS / 60000
-                }, '❄️ MAX CONSECUTIVE LOSSES REACHED -> TRIGGERING COOLDOWN');
+                    symbol,
+                    grossPnL,
+                    estimatedFees: actualCommission,
+                    netPnL,
+                    source: 'MANUAL_CALCULATION'
+                }, '⚠️ Using estimated PnL (fallback)');
             }
-        } else {
-            // Reset streak on win
-            if (this.consecutiveLosses > 0) {
-                logger.info({ previousStreak: this.consecutiveLosses }, '🔁 Winning trade resets consecutive loss streak');
+
+            // Actualizar métricas con PnL real
+            this.dailyPnL += netPnL;
+            this.accountBalance += netPnL;
+
+            const trade: Trade = {
+                symbol,
+                side: position.side,
+                entryTime: position.timestamp,
+                exitTime: Date.now(),
+                entryPrice: position.entryPrice,
+                exitPrice: exchangePnL.exitPrice || exitPrice,
+                quantity: position.quantity,
+                pnl: netPnL,
+                pnlPercent,
+                commission: actualCommission,
+            };
+
+            this.openPositions.delete(symbol);
+            const emoji = netPnL > 0 ? '✅' : '❌';
+
+            // v4.0 Streak Logic con PnL REAL
+            if (netPnL < 0) {
+                this.consecutiveLosses++;
+                logger.warn({ consecutiveLosses: this.consecutiveLosses }, '📉 Consecutive Loss recorded');
+                if (this.consecutiveLosses >= config.MAX_CONSECUTIVE_LOSSES) {
+                    this.cooldownUntil = Date.now() + config.COOLDOWN_TIME_MS;
+                    logger.warn({
+                        consecutiveLosses: this.consecutiveLosses,
+                        cooldownMinutes: config.COOLDOWN_TIME_MS / 60000
+                    }, '❄️ MAX CONSECUTIVE LOSSES REACHED -> TRIGGERING COOLDOWN');
+                }
+            } else {
+                if (this.consecutiveLosses > 0) {
+                    logger.info({ previousStreak: this.consecutiveLosses }, '🔁 Winning trade resets consecutive loss streak');
+                }
+                this.consecutiveLosses = 0;
             }
-            this.consecutiveLosses = 0;
+
+            logger.info({
+                symbol,
+                realPnL: netPnL,
+                realCommission: actualCommission,
+                pnlPercent,
+                dailyPnL: this.dailyPnL,
+                balance: this.accountBalance,
+                openPositions: this.openPositions.size,
+                consecutiveLosses: this.consecutiveLosses
+            }, `${emoji} Position closed with REAL PnL`);
+
+            // Add trade to daily history
+            this.tradesHistory.push(trade);
+
+            // Persistir estado
+            saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades, this.lastResetDate);
+            return trade;
+
+        } catch (error: any) {
+            logger.error({ error: error.message, symbol }, '❌ Error closing position');
+            throw error;
         }
-
-        logger.info({
-            symbol,
-            grossPnL,
-            totalFee,
-            netPnL,
-            pnlPercent,
-            dailyPnL: this.dailyPnL,
-            balance: this.accountBalance,
-            openPositions: this.openPositions.size,
-            consecutiveLosses: this.consecutiveLosses
-        }, `${emoji} Position closed (Fee Adjusted)`);
-
-        // Persistir estado
-        saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades, this.lastResetDate);
-        return trade;
     }
 
     /**
@@ -436,6 +583,7 @@ export class RiskManager {
             }, 'Daily reset - Previous day summary');
             this.dailyPnL = 0;
             this.dailyTrades = 0;
+            this.tradesHistory = []; // Reset trade history for new day
             this.lastResetDate = today;
             // Persistir estado (nuevo día)
             saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades, this.lastResetDate);
@@ -448,11 +596,14 @@ export class RiskManager {
         return {
             accountBalance: this.accountBalance,
             dailyPnL: this.dailyPnL,
+            allTimePnL: this.allTimePnL,
+            unrealizedPnL: this.unrealizedPnL,
             dailyPnLPercent: (this.dailyPnL / this.accountBalance) * 100,
             dailyTrades: this.dailyTrades,
             openPositions: this.openPositions.size,
             positions: Array.from(this.openPositions.values()),
             date: this.lastResetDate,
+            totalRealBalance: this.lastSyncedRealBalance
         };
     }
 
@@ -472,5 +623,61 @@ export class RiskManager {
             difference: newBalance - this.accountBalance
         }, 'Account balance updated');
         this.accountBalance = newBalance;
+    }
+
+    /**
+     * Sincroniza el balance y daily PnL con datos reales del exchange
+     * Debe llamarse periódicamente para mantener valores precisos
+     */
+    async syncBalanceWithExchange(): Promise<void> {
+        try {
+            // 🔄 IMPORTANTE: Verificar reset diario ANTES de sincronizar
+            // Si cambió el día, esto reseteará dailyPnL a 0
+            this.checkDailyReset();
+
+            // 1. Obtener balance real actual
+            const currentRealBalance = await this.exchange.syncBalance();
+
+            // 2. Calcular cambio relativo desde la última sincronización
+            // Esto evita el salto masivo si hay diferencia entre Capital Real y Capital Simulado (OVERRIDE_CAPITAL)
+            const balanceChange = currentRealBalance - this.lastSyncedRealBalance;
+
+            if (Math.abs(balanceChange) > 0.0001) {
+                // Actualizar dailyPnL con el cambio de balance real
+                this.dailyPnL += balanceChange;
+                this.accountBalance += balanceChange;
+                this.allTimePnL += balanceChange;
+                this.lastSyncedRealBalance = currentRealBalance;
+
+                logger.info({
+                    balanceChange,
+                    newDailyPnL: this.dailyPnL,
+                    newAccountBalance: this.accountBalance,
+                    allTimePnL: this.allTimePnL
+                }, '💰 Balance y PnL actualizados por cambio detectado en Exchange');
+            } else {
+                // Sincronizar con Binance directamente para mayor precisión
+                if (config.EXCHANGE_NAME === 'binance') {
+                    const binanceDailyPnL = await (this.exchange as any).fetchDailyPnL();
+                    if (Math.abs(this.dailyPnL - binanceDailyPnL) > 0.01) {
+                        logger.info({ localPnL: this.dailyPnL, binancePnL: binanceDailyPnL }, '📈 Calibrando discrepancia de PnL diario con Binance');
+                        this.dailyPnL = binanceDailyPnL;
+                    }
+
+                    // Sincronizar también All-time
+                    this.allTimePnL = await this.exchange.fetchAllTimePnL();
+                }
+                logger.debug('Sincronización finalizada.');
+            }
+
+            // Siempre actualizar el Unrealized PnL actual
+            this.unrealizedPnL = await this.exchange.getUnrealizedPnL();
+
+            // Guardar estado actualizado
+            saveRiskState(this.openPositions, this.dailyPnL, this.dailyTrades, this.lastResetDate);
+        } catch (error) {
+            logger.error({ error }, '❌ Error al sincronizar balance con exchange');
+            throw error;
+        }
     }
 }

@@ -1,0 +1,127 @@
+
+🔍 ANALIZANDO MERCADO CON ESTRATEGIA ACTUAL... (Trend Momentum)
+
+CONFIGURACIÓN:
+- Timeframe: 5m
+- Símbolos: BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT, AVAX/USDT, DOGE/USDT, XAU/USDT, XAG/USDT, TSLA/USDT, SUI/USDT, PYTH/USDT
+- ADX Umbral: 20 (Ajustado)
+- Volumen Min: +15% vs Promedio (Ajustado)
+---------------------------------------------------
+
+[2026-02-11 16:33:39] [32mINFO[39m: [36m⚠️ Initialized in PUBLIC ONLY mode (credentials cleared)[39m
+    component: "api"
+📊 Analizando BTC/USDT...
+[2026-02-11 16:33:40] [32mINFO[39m: [36m✅ Market limits loaded from CCXT[39m
+    component: "api"
+    marketsLoaded: 683
+[2026-02-11 16:33:40] [32mINFO[39m: [36m⚠️ Initialized in PUBLIC ONLY mode (credentials cleared)[39m
+    component: "api"
+   Precio: $68081.4
+   Tendencia: 🟢 ALCISTA (EMA20 > EMA200)
+   Fuerza (ADX): 27.82 ✅ FUERTE
+   RSI: 67.08
+
+   💤 Sin señal de entrada en este momento.
+      Razón: Esperando configuración técnica (Cruce/Volumen/Estructura)
+
+---------------------------------------------------
+📊 Analizando ETH/USDT...
+   Precio: $1975.99
+   Tendencia: 🔴 BAJISTA (EMA20 < EMA200)
+   Fuerza (ADX): 28.59 ✅ FUERTE
+   RSI: 72.76
+
+   💤 Sin señal de entrada en este momento.
+      Razón: RSI Sobrecompra (72.76)
+
+---------------------------------------------------
+📊 Analizando SOL/USDT...
+   Precio: $80.68
+   Tendencia: 🔴 BAJISTA (EMA20 < EMA200)
+   Fuerza (ADX): 19.12 ⚠️ DÉBIL
+   RSI: 67.91
+
+   💤 Sin señal de entrada en este momento.
+      Razón: ADX bajo (19.12 <= 20)
+
+---------------------------------------------------
+📊 Analizando XRP/USDT...
+   Precio: $1.391
+   Tendencia: 🟢 ALCISTA (EMA20 > EMA200)
+   Fuerza (ADX): 25.92 ✅ FUERTE
+   RSI: 65.58
+
+   💤 Sin señal de entrada en este momento.
+      Razón: Esperando configuración técnica (Cruce/Volumen/Estructura)
+
+---------------------------------------------------
+📊 Analizando AVAX/USDT...
+   Precio: $8.785
+   Tendencia: 🟢 ALCISTA (EMA20 > EMA200)
+   Fuerza (ADX): 22.12 ✅ FUERTE
+   RSI: 68.30
+
+   💤 Sin señal de entrada en este momento.
+      Razón: Esperando configuración técnica (Cruce/Volumen/Estructura)
+
+---------------------------------------------------
+📊 Analizando DOGE/USDT...
+   Precio: $0.09199
+   Tendencia: 🟢 ALCISTA (EMA20 > EMA200)
+   Fuerza (ADX): 24.48 ✅ FUERTE
+   RSI: 70.59
+
+   💤 Sin señal de entrada en este momento.
+      Razón: RSI Sobrecompra (70.59)
+
+---------------------------------------------------
+📊 Analizando XAU/USDT...
+   Precio: $5075.8
+   Tendencia: 🟢 ALCISTA (EMA20 > EMA200)
+   Fuerza (ADX): 12.33 ⚠️ DÉBIL
+   RSI: 37.90
+
+   💤 Sin señal de entrada en este momento.
+      Razón: ADX bajo (12.33 <= 20)
+
+---------------------------------------------------
+📊 Analizando XAG/USDT...
+   Precio: $84.18
+   Tendencia: 🟢 ALCISTA (EMA20 > EMA200)
+   Fuerza (ADX): 11.77 ⚠️ DÉBIL
+   RSI: 42.31
+
+   💤 Sin señal de entrada en este momento.
+      Razón: ADX bajo (11.77 <= 20)
+
+---------------------------------------------------
+📊 Analizando TSLA/USDT...
+   Precio: $428.27
+   Tendencia: 🟢 ALCISTA (EMA20 > EMA200)
+   Fuerza (ADX): 25.59 ✅ FUERTE
+   RSI: 60.69
+
+   💤 Sin señal de entrada en este momento.
+      Razón: Esperando configuración técnica (Cruce/Volumen/Estructura)
+
+---------------------------------------------------
+📊 Analizando SUI/USDT...
+   Precio: $0.9145
+   Tendencia: 🟢 ALCISTA (EMA20 > EMA200)
+   Fuerza (ADX): 31.61 ✅ FUERTE
+   RSI: 76.24
+
+   💤 Sin señal de entrada en este momento.
+      Razón: RSI Sobrecompra (76.24)
+
+---------------------------------------------------
+📊 Analizando PYTH/USDT...
+   Precio: $0.04419
+   Tendencia: 🟢 ALCISTA (EMA20 > EMA200)
+   Fuerza (ADX): 24.21 ✅ FUERTE
+   RSI: 74.92
+
+   💤 Sin señal de entrada en este momento.
+      Razón: RSI Sobrecompra (74.92)
+
+---------------------------------------------------

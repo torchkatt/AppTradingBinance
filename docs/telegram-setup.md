@@ -46,7 +46,7 @@ Reemplaza con tus valores reales.
 Una vez configurado, reinicia el bot de trading:
 
 ```bash
-npm run dev
+npm run bot
 ```
 
 Deberías recibir un mensaje de bienvenida en Telegram confirmando que el bot está conectado.

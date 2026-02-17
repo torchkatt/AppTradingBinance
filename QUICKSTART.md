@@ -151,7 +151,7 @@ Una vez que el backtest sea exitoso:
 
 ```bash
 # Iniciar en modo desarrollo (auto-reload)
-npm run dev
+npm run bot
 ```
 
 **Qué esperar:**
@@ -369,7 +369,7 @@ npm run health-check
 npm run backtest -- --symbol BTC/USDT --period 2023-01-01:2024-01-01
 
 # Paper trading
-npm run dev
+npm run bot
 
 # Live trading (después de compilar)
 npm start

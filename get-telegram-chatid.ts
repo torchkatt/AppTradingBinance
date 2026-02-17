@@ -46,7 +46,7 @@ async function getChatId() {
         console.log('📝 Ahora agrega estos valores a tu archivo .env:\n');
         console.log(`TELEGRAM_BOT_TOKEN=${BOT_TOKEN}`);
         console.log(`TELEGRAM_CHAT_ID=${chatId}`);
-        console.log('\n✨ Luego reinicia el bot con: npm run dev');
+        console.log('\n✨ Luego reinicia el bot con: npm run bot');
 
     } catch (error: any) {
         console.log('❌ Error al conectar con Telegram:', error.message);

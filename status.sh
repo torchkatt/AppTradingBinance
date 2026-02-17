@@ -106,7 +106,7 @@ if [ "$needs_install" = false ] && [ "$needs_config" = false ]; then
     echo ""
     echo "   npm run health-check    # Verificar configuración"
     echo "   npm run backtest --     # Hacer backtesting"
-    echo "   npm run dev            # Iniciar en modo desarrollo"
+    echo "   npm run bot            # Iniciar en modo desarrollo"
     echo ""
 fi
 

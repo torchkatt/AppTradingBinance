@@ -82,7 +82,7 @@ async function main() {
         logger.info('✅ All checks passed! System is ready to trade.');
         logger.info('');
         logger.info('To start trading:');
-        logger.info('  npm run dev    (development mode)');
+        logger.info('  npm run bot    (development mode)');
         logger.info('  npm start      (production mode)');
     } else {
         logger.error('❌ Some checks failed. Please fix the issues before trading.');

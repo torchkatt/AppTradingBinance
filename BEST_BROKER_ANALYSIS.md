@@ -253,7 +253,7 @@ EXCHANGE_API_SECRET=nuevo_secret
 EXCHANGE_TESTNET=true
 
 # Paso 4: Probar 48h en testnet
-npm run dev
+npm run bot
 
 # Paso 5: Si todo OK, pasar a real
 EXCHANGE_TESTNET=false

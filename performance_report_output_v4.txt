@@ -1,0 +1,6 @@
+
+📊 REPORTE DE RENDIMIENTO (Últimos 5 días)
+
+[2026-02-12 22:39:10] [33mWARN[39m: [36m⚠️ Could not connect to database. System will continue in OPTIONAL DATABASE mode (Results will only be shown in logs/Telegram)[39m
+    error: ""
+[2026-02-12 22:39:10] [32mINFO[39m: [36mDatabase connection pool closed[39m

@@ -168,7 +168,7 @@ export class ExchangeConnector {
                 await this.exchange.fapiPrivatePostMultiAssetsMargin({ multiAssetsMargin: 'false' });
                 logger.info('✅ Account set to Single-Asset Mode');
             } catch (e: any) {
-                if (e.message.includes('No need to change') || e.message.includes('already in')) {
+                if (e.message.includes('No need to change') || e.message.includes('already in') || e.message.includes('-4171')) {
                     logger.debug('ℹ️ Account already in Single-Asset Mode');
                 } else {
                     logger.warn({ error: e.message }, '⚠️ Could not enforce Single-Asset Mode');
@@ -667,5 +667,285 @@ export class ExchangeConnector {
      */
     getExchange(): any {
         return this.exchange;
+    }
+
+    /**
+     * Obtiene el balance de la cuenta
+     */
+    async fetchBalance(): Promise<any> {
+        try {
+            const params = config.EXCHANGE_NAME === 'bybit' ? { type: 'contract' } : {};
+            return await this.exchange.fetchBalance(params);
+        } catch (error: any) {
+            logger.error({ error: error.message }, 'Failed to fetch balance');
+            throw error;
+        }
+    }
+
+    /**
+     * Obtiene el PnL realizado y comisiones reales de la última posición cerrada
+     * Usa los trades recientes del exchange
+     * 
+     * @param symbol - Par de trading (ej: 'BTC/USDT')
+     * @returns { realizedPnl: number, commission: number, exitPrice: number }
+     */
+    async getPositionPnL(symbol: string): Promise<{ realizedPnl: number; commission: number; exitPrice: number }> {
+        try {
+            logger.info({ symbol }, '🔍 Fetching real PnL from exchange...');
+
+            // Obtener trades recientes para este símbolo
+            const trades = await this.exchange.fetchMyTrades(symbol, undefined, 20);
+
+            if (!trades || trades.length === 0) {
+                logger.warn({ symbol }, 'No recent trades found for PnL calculation');
+                return { realizedPnl: 0, commission: 0, exitPrice: 0 };
+            }
+
+            // Ordenar por timestamp descendente (más reciente primero)
+            const sortedTrades = trades.sort((a: any, b: any) => b.timestamp - a.timestamp);
+
+            // Calcular PnL realizado y comisiones totales de los últimos trades
+            let totalRealizedPnl = 0;
+            let totalCommission = 0;
+            let exitPrice = 0;
+
+            // Para Binance/Bybit futures, cada trade tiene:
+            // - realizedPnl: PnL realizado en ese trade
+            // - fee: comisión pagada
+            // - price: precio de ejecución
+
+            for (const trade of sortedTrades.slice(0, 5)) { // Últimos 5 trades
+                const pnl = trade.info?.realizedPnl || trade.info?.realized_pnl || 0;
+                const fee = trade.fee?.cost || 0;
+
+                totalRealizedPnl += parseFloat(pnl.toString());
+                totalCommission += parseFloat(fee.toString());
+
+                // Usar el precio del trade más reciente como exit price
+                if (exitPrice === 0) {
+                    exitPrice = trade.price || 0;
+                }
+
+                logger.debug({
+                    tradeId: trade.id,
+                    timestamp: new Date(trade.timestamp).toISOString(),
+                    price: trade.price,
+                    amount: trade.amount,
+                    side: trade.side,
+                    realizedPnl: pnl,
+                    fee: fee
+                }, 'Trade detail');
+            }
+
+            logger.info({
+                symbol,
+                totalRealizedPnl,
+                totalCommission,
+                netPnl: totalRealizedPnl - totalCommission,
+                exitPrice
+            }, '✅ Real PnL fetched from exchange');
+
+            return {
+                realizedPnl: totalRealizedPnl,
+                commission: totalCommission,
+                exitPrice
+            };
+
+        } catch (error: any) {
+            logger.error({ error: error.message, symbol }, '❌ Failed to fetch position PnL from exchange');
+            // En caso de error, retornar 0s para que el sistema pueda continuar
+            // pero logear el error para debugging
+            return { realizedPnl: 0, commission: 0, exitPrice: 0 };
+        }
+    }
+
+    /**
+     * Sincroniza el balance de la cuenta desde el exchange
+     * Útil para actualizar el balance real después de trades
+     */
+    async syncBalance(): Promise<number> {
+        try {
+            const balance = await this.fetchBalance();
+            const usdtBalance = balance['USDT']?.total || balance.USDT?.free || 0;
+
+            logger.info({ balance: usdtBalance }, '💰 Balance synced from exchange');
+            return parseFloat(usdtBalance.toString());
+        } catch (error: any) {
+            logger.error({ error: error.message }, 'Failed to sync balance');
+            throw error;
+        }
+    }
+
+    /**
+     * Obtiene el PnL neto de hoy (Realized PnL - Commissions) desde Binance
+     * Sincronización exacta con "Resultados de Hoy" en Binance
+     */
+    async fetchDailyPnL(): Promise<number> {
+        if (config.EXCHANGE_NAME !== 'binance') return 0;
+
+        try {
+            // Hoy a las 00:00 UTC (Binance usa UTC)
+            const now = new Date();
+            const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).getTime();
+
+            // 1. Obtener Realized PnL de hoy
+            const income = await this.exchange.fapiPrivateGetIncome({
+                incomeType: 'REALIZED_PNL',
+                startTime: todayStart
+            });
+
+            // 2. Obtener Comisiones de hoy
+            const fees = await this.exchange.fapiPrivateGetIncome({
+                incomeType: 'COMMISSION',
+                startTime: todayStart
+            });
+
+            const realizedPnL = (income || []).reduce((acc: number, item: any) => acc + parseFloat(item.income), 0);
+            const commissions = (fees || []).reduce((acc: number, item: any) => acc + parseFloat(item.income), 0);
+
+            const netPnL = realizedPnL + commissions; // Commissions son negativas en income
+
+            logger.info({
+                startTime: new Date(todayStart).toISOString(),
+                realized: realizedPnL,
+                fees: commissions,
+                netDailyPnL: netPnL
+            }, '💰 Sincronización de PnL Diaria con Binance completada');
+
+            return netPnL;
+        } catch (error: any) {
+            logger.error({ error: error.message }, '❌ Error al sincronizar PnL de hoy con Binance');
+            return 0; // Fallback
+        }
+    }
+
+    async fetchAllTimePnL(): Promise<number> {
+        if (config.EXCHANGE_NAME !== 'binance') return 0;
+
+        try {
+            const now = Date.now();
+            const ninetyDaysAgo = now - (90 * 24 * 60 * 60 * 1000);
+
+            // Función auxiliar para traer todo el historial paginado de un tipo en bloques de 7 días
+            const fetchFullIncome = async (type: string) => {
+                let allIncome: any[] = [];
+                let currentStart = ninetyDaysAgo;
+                const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+
+                while (currentStart < now) {
+                    let currentEnd = Math.min(currentStart + sevenDaysMs, now);
+                    let hasMoreInWindow = true;
+
+                    while (hasMoreInWindow) {
+                        const batch: any[] = await this.exchange.fapiPrivateGetIncome({
+                            incomeType: type,
+                            startTime: currentStart,
+                            endTime: currentEnd,
+                            limit: 1000
+                        });
+
+                        if (batch && batch.length > 0) {
+                            allIncome = allIncome.concat(batch);
+                            // Avanzar el inicio al siguiente ms del último registro para paginar dentro de la ventana
+                            const lastTime = parseInt(batch[batch.length - 1].time);
+                            if (isNaN(lastTime)) {
+                                hasMoreInWindow = false;
+                            } else {
+                                currentStart = lastTime + 1;
+                                if (batch.length < 1000) hasMoreInWindow = false;
+                            }
+                        } else {
+                            hasMoreInWindow = false;
+                        }
+
+                        // Pequeño respiro para el event loop y evitar rate limits
+                        await new Promise(resolve => setTimeout(resolve, 50));
+                    }
+
+                    // Asegurar que avanzamos la ventana aunque no hubiera registros en ella
+                    currentStart = currentEnd + 1;
+                }
+                return allIncome;
+            };
+
+            const realized = await fetchFullIncome('REALIZED_PNL');
+            const commissions = await fetchFullIncome('COMMISSION');
+            const funding = await fetchFullIncome('FUNDING_FEE');
+
+            const totalRealized = realized.reduce((acc, item) => acc + parseFloat(item.income), 0);
+            const totalCommissions = commissions.reduce((acc, item) => acc + parseFloat(item.income), 0);
+            const totalFunding = funding.reduce((acc, item) => acc + parseFloat(item.income), 0);
+
+            const netTotal = totalRealized + totalCommissions + totalFunding;
+
+            logger.info({
+                records: realized.length + commissions.length + funding.length,
+                netTotal
+            }, '📊 PnL Histórico (últimos 90 días) recalculado con éxito');
+
+            return netTotal;
+        } catch (error: any) {
+            logger.warn({ err: error.message }, 'Failed to fetch all-time PnL from Binance');
+            return 0;
+        }
+    }
+
+    /**
+     * Obtiene el historial detallado de ingresos (PnL, Comisiones, Funding) de Binance
+     */
+    async getIncomeHistory(days: number = 7): Promise<any[]> {
+        if (config.EXCHANGE_NAME !== 'binance') return [];
+
+        try {
+            const now = Date.now();
+            const startTime = now - (days * 24 * 60 * 60 * 1000);
+
+            const fetchType = async (type: string) => {
+                const results = await this.exchange.fapiPrivateGetIncome({
+                    incomeType: type,
+                    startTime: startTime,
+                    endTime: now,
+                    limit: 1000
+                });
+                return results || [];
+            };
+
+            const [realized, commissions, funding] = await Promise.all([
+                fetchType('REALIZED_PNL'),
+                fetchType('COMMISSION'),
+                fetchType('FUNDING_FEE')
+            ]);
+
+            // Combinar y formatear
+            const all = [
+                ...realized.map((i: any) => ({ ...i, type: 'PnL Realizado' })),
+                ...commissions.map((i: any) => ({ ...i, type: 'Comisión' })),
+                ...funding.map((i: any) => ({ ...i, type: 'Funding Fee' }))
+            ];
+
+            // Ordenar por tiempo descendente
+            return all.sort((a, b) => parseInt(b.time) - parseInt(a.time));
+        } catch (error: any) {
+            logger.error({ error: error.message }, 'Failed to fetch income history from Binance');
+            return [];
+        }
+    }
+
+    /**
+     * Obtiene el PnL No Realizado (Floating) total de la cuenta
+     */
+    async getUnrealizedPnL(): Promise<number> {
+        try {
+            if (config.EXCHANGE_NAME === 'binance') {
+                const account = await this.exchange.fapiPrivateGetAccount();
+                return parseFloat(account.totalUnrealizedProfit || '0');
+            }
+
+            const balance = await this.exchange.fetchBalance();
+            return parseFloat(balance.info?.totalUnrealizedProfit || '0');
+        } catch (error: any) {
+            logger.debug({ error: error.message }, 'No se pudo obtener PnL no realizado de la cuenta');
+            return 0;
+        }
     }
 }

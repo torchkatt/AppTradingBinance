@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const ConfigSchema = z.object({
+export const ConfigSchema = z.object({
     // Exchange Configuration
     EXCHANGE_NAME: z.enum(['binance', 'bybit', 'alpaca', 'kraken']),
     EXCHANGE_API_KEY: z.string().min(1, 'API Key is required'),
@@ -50,7 +50,7 @@ const ConfigSchema = z.object({
     TELEGRAM_CHAT_ID: z.string().optional(),
 
     // Server
-    PORT: z.number().default(3000),
+    PORT: z.number().default(3005),
     WEBHOOK_SECRET: z.string().min(32, 'Webhook secret debe tener al menos 32 caracteres'),
 
     // Trading
@@ -79,7 +79,8 @@ function parseConfig(): Config {
             MAX_STOP_LOSS_PCT: process.env.MAX_STOP_LOSS_PCT ? Number(process.env.MAX_STOP_LOSS_PCT) : 0.001,
 
             // v4.0 Trading Parameters (read from ENV or use Schema defaults)
-            TAKE_PROFIT_ROI: process.env.TAKE_PROFIT_ROI ? Number(process.env.TAKE_PROFIT_ROI) : 0.08,
+            // Note: TAKE_PROFIT_ROI default is 1.5% price move = 15% ROI @ 10x leverage
+            TAKE_PROFIT_ROI: process.env.TAKE_PROFIT_ROI ? Number(process.env.TAKE_PROFIT_ROI) : 0.015,
             STOP_LOSS_ROI: process.env.STOP_LOSS_ROI ? Number(process.env.STOP_LOSS_ROI) : 0.025,
             TRAILING_ACTIVATION_ROI: process.env.TRAILING_ACTIVATION_ROI ? Number(process.env.TRAILING_ACTIVATION_ROI) : 0.03,
             TRAILING_LOCK_ROI: process.env.TRAILING_LOCK_ROI ? Number(process.env.TRAILING_LOCK_ROI) : 0.022,
@@ -99,7 +100,7 @@ function parseConfig(): Config {
             TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
             TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID,
 
-            PORT: Number(process.env.PORT) || 3000,
+            PORT: Number(process.env.PORT) || 3005,
             WEBHOOK_SECRET: process.env.WEBHOOK_SECRET,
 
             SYMBOLS: process.env.SYMBOLS?.split(',').map(s => s.trim()),
@@ -123,3 +124,40 @@ function parseConfig(): Config {
 }
 
 export const config = parseConfig();
+
+import fs from 'fs';
+import path from 'path';
+
+export async function updateEnvFile(updates: Record<string, any>) {
+    const envPath = path.resolve(process.cwd(), '.env');
+    let envContent = '';
+
+    try {
+        envContent = fs.readFileSync(envPath, 'utf-8');
+    } catch (e) {
+        console.warn('⚠️ No se encontró el archivo .env, se creará uno nuevo.');
+    }
+
+    for (const [key, value] of Object.entries(updates)) {
+        // Ensure values are stringified correctly
+        const stringValue = String(value);
+
+        // Regex to find 'KEY=value' preserving comments if possible (simple regex)
+        // Matches start of line, key, optional space, equals, optional space, rest of line
+        const regex = new RegExp(`^${key}=.*`, 'm');
+
+        if (regex.test(envContent)) {
+            envContent = envContent.replace(regex, `${key}=${stringValue}`);
+        } else {
+            // Append if not exists, ensure newline
+            if (envContent && !envContent.endsWith('\n')) {
+                envContent += '\n';
+            }
+            envContent += `${key}=${stringValue}\n`;
+        }
+    }
+
+    fs.writeFileSync(envPath, envContent, 'utf-8');
+    console.log(`✅ Archivo .env actualizado con: ${Object.keys(updates).join(', ')}`);
+}
+

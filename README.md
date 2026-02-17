@@ -78,7 +78,7 @@ npm run backtest -- --strategy MeanReversion --symbol BTCUSDT --period 2023-01-0
 
 ```bash
 # Ejecutar en modo paper trading (sin dinero real)
-npm run dev
+npm run bot
 ```
 
 ### Live Trading (Solo después de validar)

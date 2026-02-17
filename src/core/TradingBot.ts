@@ -1,11 +1,12 @@
 import { ExchangeConnector } from '../core/ExchangeConnector.js';
+import { EventEmitter } from 'events';
 import { RiskManager } from '../core/RiskManager.js';
 import { TelegramNotifier } from '../monitoring/TelegramNotifier.js';
 import { Strategy } from '../strategies/base/Strategy.js';
 import { db } from '../database/index.js';
 import { config } from '../config/index.js';
 import { tradeLogger as logger } from '../utils/logger.js';
-import { EMA, BollingerBands, ATR } from 'technicalindicators';
+import { EMA, BollingerBands, ATR, RSI, ADX } from 'technicalindicators';
 import { OHLCV, Position } from '../types/index.js';
 import { Mutex } from 'async-mutex';
 /**
@@ -18,7 +19,7 @@ import { Mutex } from 'async-mutex';
  * - Gestionar stop loss y take profit
  * - Recuperarse de errores
  */
-export class TradingBot {
+export class TradingBot extends EventEmitter {
     private exchange: ExchangeConnector;
     private riskManager: RiskManager;
     private notifier: TelegramNotifier;
@@ -26,7 +27,69 @@ export class TradingBot {
     private isRunning: boolean = false;
     private monitoringIntervals: Map<string, NodeJS.Timeout> = new Map();
     // private statusInterval: NodeJS.Timeout | null = null;
-    private mutex: Mutex = new Mutex();
+    private mutex: Mutex = new Mutex(); // Mutex para operaciones críticas
+    private lastAnalysis: Map<string, any> = new Map(); // Store latest analysis per symbol
+
+    // --- Métodos de Integración para API/Dashboard ---
+
+    public getConfig() {
+        return config;
+    }
+
+    public getRiskManager(): RiskManager {
+        return this.riskManager;
+    }
+
+    public getRiskState() {
+        return this.riskManager.getState();
+    }
+
+    public getExchange(): ExchangeConnector {
+        return this.exchange;
+    }
+
+    public getMarketAnalysis() {
+        return Object.fromEntries(this.lastAnalysis);
+    }
+
+    public getMode(): string {
+        return process.env.DRY_RUN === 'true' ? 'PAPER' : 'LIVE';
+    }
+
+    public botIsRunning(): boolean {
+        return this.isRunning;
+    }
+
+    public pause(): void {
+        this.isRunning = false;
+        logger.info('⏸️ Bot paused via API');
+    }
+
+    public resume(): void {
+        this.isRunning = true;
+        logger.info('▶️ Bot resumed via API');
+    }
+
+    public async closePositionFromDashboard(symbol: string): Promise<void> {
+        const price = await this.getCurrentPrice(symbol);
+        await this.closePosition(symbol, price);
+    }
+
+    public async emergencyCloseAll(): Promise<void> {
+        logger.warn('🚨 Emergency Close All Triggered');
+        const positions = this.riskManager.getState().positions;
+        for (const pos of positions) {
+            await this.closePositionFromDashboard(pos.symbol);
+        }
+    }
+
+    public isInCooldown(): boolean {
+        return this.riskManager.getCooldownUntil() > Date.now();
+    }
+
+    public getCooldownUntil(): number {
+        return this.riskManager.getCooldownUntil();
+    }
 
     constructor(
         exchange: ExchangeConnector,
@@ -34,6 +97,7 @@ export class TradingBot {
         notifier: TelegramNotifier,
         strategies: Strategy[]
     ) {
+        super();
         this.exchange = exchange;
         this.riskManager = riskManager;
         this.notifier = notifier;
@@ -61,6 +125,8 @@ export class TradingBot {
         this.startHourlyReporting();
         // Iniciar Reporte Diario (Cada hora y al cierre)
         this.startHourlyReporting();
+        // Iniciar Sincronización de Balance y PnL (Cada 5 minutos)
+        this.startBalanceSyncLoop();
 
         logger.info({
             symbols: config.SYMBOLS,
@@ -173,6 +239,25 @@ export class TradingBot {
             // logger.error({ error }, '❌ Error en Housekeeping');
         }
     }
+    /**
+     * Ciclo de sincronización de balance y PnL con el exchange
+     */
+    private startBalanceSyncLoop(): void {
+        const INTERVAL = 5 * 60 * 1000; // Cada 5 minutos
+        setInterval(async () => {
+            if (!this.isRunning) return;
+            try {
+                logger.info('🔄 Sincronizando balance y PnL con el exchange...');
+                // @ts-ignore - Acceso directo para sincronización forzada
+                if (this.riskManager.syncBalanceWithExchange) {
+                    await (this.riskManager as any).syncBalanceWithExchange();
+                }
+            } catch (error) {
+                logger.debug({ error }, 'Error en loop de sincronización de balance');
+            }
+        }, INTERVAL);
+    }
+
     /**
      * Inicia el ciclo de reportes de estado
      */
@@ -549,6 +634,25 @@ export class TradingBot {
                 // En este diseño, monitorOpenPositions se llama también desde el Fast Loop, así que no es crítico aquí.
                 await this.monitorOpenPositions(symbol, data[data.length - 1].close);
 
+                // [NUEVO] 1.6 Calculos para Reporte de Estado (Scanner)
+                // Usamos technicalindicators para metricas de reporte
+                const closes = data.map(c => c.close);
+                const highs = data.map(c => c.high);
+                const lows = data.map(c => c.low);
+
+                const ema200Val = EMA.calculate({ period: 200, values: closes }).pop() || 0;
+                const rsiVal = RSI.calculate({ period: 14, values: closes }).pop() || 0;
+                const adxVal = ADX.calculate({ period: 14, high: highs, low: lows, close: closes }).pop();
+
+                this.lastAnalysis.set(symbol, {
+                    price: data[data.length - 1].close,
+                    trend: data[data.length - 1].close > ema200Val ? 'BULLISH' : 'BEARISH',
+                    rsi: rsiVal,
+                    adx: adxVal ? adxVal.adx : 0,
+                    ema200: ema200Val,
+                    timestamp: Date.now()
+                });
+
             } catch (error: any) {
                 logger.error({ error: error.message, symbol }, 'Error analyzing market');
             }
@@ -575,7 +679,7 @@ export class TradingBot {
                 }
             }
             // 1. Verificar si se puede abrir posición
-            const canOpen = this.riskManager.canOpenPosition(symbol);
+            const canOpen = await this.riskManager.canOpenPosition(symbol);
             if (!canOpen.allowed) {
                 logger.warn({ symbol, reason: canOpen.reason }, 'Cannot open position');
                 if (canOpen.reason?.includes('CIRCUIT BREAKER')) {
@@ -678,7 +782,7 @@ export class TradingBot {
             // 2. Obtener precio de salida
             const currentPrice = exitPrice || (await this.getCurrentPrice(symbol));
             // 3. Actualizar RiskManager
-            const trade = this.riskManager.closePosition(symbol, currentPrice);
+            const trade = await this.riskManager.closePosition(symbol, currentPrice);
             if (!trade) {
                 logger.warn({ symbol }, 'No position found to close');
                 return;

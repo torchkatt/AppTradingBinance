@@ -155,7 +155,7 @@ async function run() {
             logger.info('🎉 ALL CHECKS PASSED! Strategy is ready for paper trading.');
             logger.info('');
             logger.info('Next steps:');
-            logger.info('  1. Run paper trading for 2 weeks: npm run dev');
+            logger.info('  1. Run paper trading for 2 weeks: npm run bot');
             logger.info('  2. Monitor daily performance via Telegram');
             logger.info('  3. Only after validation, consider live trading with minimal capital');
         } else {
