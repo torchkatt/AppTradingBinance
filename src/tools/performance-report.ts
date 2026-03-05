@@ -1,6 +1,6 @@
 
 import { db } from '../database/index.js';
-import { logger } from '../utils/logger.js';
+
 
 async function generateReport() {
     try {

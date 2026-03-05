@@ -365,8 +365,16 @@ export class ExchangeConnector {
                     );
                     logger.info({ stopLoss }, '🛡️ Stop Loss colocado');
                 } catch (e: any) {
-                    logger.error({ error: e.message, stopLoss }, '❌ CRÍTICO: Fallo al colocar Stop Loss');
-                    // Continuar - la posición queda sin SL pero al menos está registrada
+                    logger.error({ error: e.message, stopLoss }, '❌ CRÍTICO: Fallo al colocar Stop Loss. Cerrando posición por seguridad.');
+                    // SEGURIDAD: Sin SL en el exchange es inaceptable.
+                    // Cerrar la posición inmediatamente para evitar pérdidas no controladas.
+                    try {
+                        await this.createMarketOrder(symbol, slSide, amount);
+                        logger.info({ symbol }, '🔒 Posición cerrada por seguridad (fallo de SL)');
+                    } catch (closeErr: any) {
+                        logger.error({ error: closeErr.message, symbol }, '🚨 EMERGENCIA: No se pudo cerrar posición sin SL. Intervención manual requerida.');
+                    }
+                    throw new Error(`Stop Loss no pudo colocarse en el exchange: ${e.message}`);
                 }
             }
 
@@ -488,11 +496,28 @@ export class ExchangeConnector {
 
     /**
      * Cierra todas las posiciones de un símbolo
+     * Cancela órdenes pendientes (SL/TP) ANTES del cierre para evitar órdenes huérfanas
      */
     async closeAllPositions(symbol: string): Promise<void> {
         try {
-            const positions = await this.getOpenPositions(symbol);
+            // 1. Cancelar órdenes pendientes (SL/TP) para limpiar el estado del exchange
+            try {
+                const openOrders = await this.getOpenOrders(symbol);
+                for (const order of openOrders) {
+                    try {
+                        await this.cancelOrder(order.id, symbol);
+                        logger.debug({ orderId: order.id, symbol }, '🗑️ Orden pendiente cancelada antes de cerrar posición');
+                    } catch (cancelErr: any) {
+                        // No bloquear el cierre si no se puede cancelar una orden
+                        logger.warn({ orderId: order.id, symbol, error: cancelErr.message }, 'No se pudo cancelar orden pendiente');
+                    }
+                }
+            } catch (ordersErr: any) {
+                logger.warn({ symbol, error: ordersErr.message }, 'No se pudo obtener órdenes pendientes para cancelar');
+            }
 
+            // 2. Cerrar posición con orden MARKET
+            const positions = await this.getOpenPositions(symbol);
             for (const position of positions) {
                 const side = position.side === 'long' ? 'sell' : 'buy';
                 await this.createMarketOrder(symbol, side, position.contracts);

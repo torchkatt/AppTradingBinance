@@ -41,8 +41,9 @@ export interface Metrics {
     consecutiveLosses: number;
     circuitBreakers: {
         dailyLoss: { active: boolean; current: number; limit: number };
-        cooldown: { active: boolean; until: number | null };
-        maxPositions: { active: boolean; current: number; limit: number };
+        consecutiveLosses: { active: boolean; current: number; limit: number };
+        cooldown?: { active: boolean; until: number | null };
+        maxPositions?: { active: boolean; current: number; limit: number };
     };
 }
 
@@ -70,6 +71,24 @@ export interface Config {
     SYMBOLS: string[];
     TIMEFRAME: string;
     [key: string]: unknown; // Allow for other fields
+}
+
+export interface OrchestratorInfo {
+    available: boolean;
+    regime: {
+        type: string;
+        adx: number;
+        plusDI: number;
+        minusDI: number;
+        atrPct: number;
+        bbWidth: number;
+        confidence: number;
+        description: string;
+    } | null;
+    activeStrategy: string;
+    signalCounts: Record<string, number>;
+    summary: string;
+    timestamp: number;
 }
 
 export const api = {
@@ -120,6 +139,10 @@ export const api = {
     },
     async restart(): Promise<{ success: boolean; message: string }> {
         const { data } = await apiClient.post('/restart');
+        return data;
+    },
+    async getOrchestrator(): Promise<OrchestratorInfo> {
+        const { data } = await apiClient.get('/orchestrator');
         return data;
     },
 };

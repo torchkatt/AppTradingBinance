@@ -3,10 +3,10 @@ import { logger } from './utils/logger.js';
 import { RiskManager } from './core/RiskManager.js';
 import { ExchangeConnector } from './core/ExchangeConnector.js';
 import { TradingBot } from './core/TradingBot.js';
-import { MeanReversionStrategy } from './strategies/MeanReversionStrategy.js';
-import { TrendMomentumStrategy } from './strategies/TrendMomentumStrategy.js';
+import { MultiStrategyOrchestrator } from './strategies/MultiStrategyOrchestrator.js';
 import { TelegramNotifier } from './monitoring/TelegramNotifier.js';
 import { db } from './database/index.js';
+import { SingletonLock } from './utils/singleton.js';
 
 /**
  * Sistema principal de trading automatizado
@@ -18,14 +18,11 @@ class TradingSystem {
     private riskManager!: RiskManager;
     private tradingBot!: TradingBot;
     private notifier: TelegramNotifier;
-    private strategies: (MeanReversionStrategy | TrendMomentumStrategy)[];
+    private readonly orchestrator: MultiStrategyOrchestrator;
 
     constructor() {
-        // Crear estrategias
-        this.strategies = [
-            // new MeanReversionStrategy(), // Desactivado por solicitud de usuario (quiere seguir tendencia)
-            new TrendMomentumStrategy(), // Activado: Estrategia Cardona (Tendencia + Squeeze)
-        ];
+        // Sistema multi-estrategia con selección automática por régimen de mercado
+        this.orchestrator = new MultiStrategyOrchestrator();
 
         // Inicializar notificador
         this.notifier = new TelegramNotifier();
@@ -84,7 +81,7 @@ class TradingSystem {
                 this.exchange,
                 this.riskManager,
                 this.notifier,
-                this.strategies
+                [this.orchestrator]
             );
             logger.info('✅ Trading Bot created');
 
@@ -105,7 +102,7 @@ class TradingSystem {
             logger.info(`  Mode:             ${config.EXCHANGE_TESTNET ? '⚠️  TESTNET' : '🔴 LIVE TRADING'}`);
             logger.info(`  Symbols:          ${config.SYMBOLS.join(', ')}`);
             logger.info(`  Timeframe:        ${config.TIMEFRAME}`);
-            logger.info(`  Strategies:       ${this.strategies.map(s => s.name).join(', ')}`);
+            logger.info(`  Strategies:       ${this.orchestrator.name}`);
             logger.info(`  Balance:          ${effectiveBalance.toFixed(2)} USDT${config.OVERRIDE_CAPITAL ? ' (OVERRIDE)' : ''}`);
             logger.info('');
             logger.info('  Risk Management:');
@@ -176,6 +173,14 @@ class TradingSystem {
  * Entry point
  */
 async function main() {
+    // 🔒 CRITICAL: Verificar que no haya otra instancia corriendo
+    if (!SingletonLock.acquire()) {
+        process.exit(1);
+    }
+
+    // Configurar limpieza automática del lock file
+    SingletonLock.setupCleanup();
+
     const system = new TradingSystem();
 
     // Manejo de señales de terminación

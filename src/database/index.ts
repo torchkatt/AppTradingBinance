@@ -10,7 +10,7 @@ const { Pool } = pg;
  * Maneja todas las operaciones de persistencia
  */
 export class Database {
-    private pool: InstanceType<typeof Pool>;
+    public pool: InstanceType<typeof Pool>;
 
     constructor() {
         this.pool = new Pool({

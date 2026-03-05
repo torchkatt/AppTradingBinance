@@ -12,15 +12,15 @@ export const ConfigSchema = z.object({
 
     // Risk Management
     MAX_POSITION_SIZE_PCT: z.number().min(0).max(1).default(0.1), // 10% máximo por posición
-    MAX_DAILY_LOSS_PCT: z.number().min(0).max(1).default(0.03), // 3% pérdida diaria máxima
-    RISK_PER_TRADE_PCT: z.number().min(0).max(0.05).default(0.01), // 1% por trade (Conservador)
-    MAX_OPEN_POSITIONS: z.number().int().min(1).default(2), // Max 2 trades simultáneos (v4.0)
-    DEFAULT_LEVERAGE: z.number().min(1).max(125).default(10), // 10x por defecto
+    MAX_DAILY_LOSS_PCT: z.number().min(0).max(1).default(0.02), // 🔧 OPTIMIZADO: 2% pérdida diaria máxima (era 3%)
+    RISK_PER_TRADE_PCT: z.number().min(0).max(0.05).default(0.005), // 🔧 OPTIMIZADO: 0.5% por trade (era 1%)
+    MAX_OPEN_POSITIONS: z.number().int().min(1).default(2), // 🔧 OPTIMIZADO: 2 trades NO correlacionados (era 6)
+    DEFAULT_LEVERAGE: z.number().min(1).max(125).default(3), // 🔧 OPTIMIZADO: 3x leverage (era 10x)
     MAX_STOP_LOSS_PCT: z.number().min(0).max(0.1).default(0.001),
 
     // v4.0 Trading Parameters
-    TAKE_PROFIT_ROI: z.number().default(0.015), // 1.5% Price Move (= 15% ROI @ 10x)
-    STOP_LOSS_ROI: z.number().default(0.025), // 2.5% ROI (Distance)
+    TAKE_PROFIT_ROI: z.number().default(0.05), // 🔧 FINAL: 5% Price Move - Ratio 2.5:1 para rentabilidad
+    STOP_LOSS_ROI: z.number().default(0.02), // 🔧 OPTIMIZADO: 2% ROI Distance (era 2.5%)
 
     // v4.0 Profit Goals & Fees
     MAX_DAILY_PROFIT_PCT: z.number().default(0.15), // 15% Daily Goal
@@ -32,12 +32,12 @@ export const ConfigSchema = z.object({
     MAX_VOLATILITY_ATR_PCT: z.number().default(0.02), // 2% ATR Threshold
 
     // v4.0 Timing & Filters
-    SCAN_INTERVAL_MS: z.number().default(600000), // 10 min
+    SCAN_INTERVAL_MS: z.number().default(300000), // 5 min (debe coincidir con TIMEFRAME)
     POSITION_CHECK_INTERVAL_MS: z.number().default(2000), // 2 sec
-    MAX_TRADE_DURATION_MS: z.number().default(1200000), // 20 min
+    MAX_TRADE_DURATION_MS: z.number().default(86400000), // 24h (Desactivado efecto inmediato)
     // v4.0 Streak Control
     MAX_CONSECUTIVE_LOSSES: z.number().default(2),
-    COOLDOWN_TIME_MS: z.number().default(1200000), // 20 min
+    COOLDOWN_TIME_MS: z.number().default(3600000), // 1h Cooldown (era 20 min)
 
     ORDER_TTL_MINUTES: z.number().default(30), // 30 min Order Expiry
 
@@ -59,6 +59,12 @@ export const ConfigSchema = z.object({
 
     // Capital Override (for testing with specific amount)
     OVERRIDE_CAPITAL: z.number().optional(),
+
+    // Strategy enable/disable flags
+    STRATEGY_TREND_ENABLED: z.boolean().default(true),
+    STRATEGY_MEAN_REVERSION_ENABLED: z.boolean().default(true),
+    STRATEGY_BREAKOUT_ENABLED: z.boolean().default(true),
+    STRATEGY_SCALPING_ENABLED: z.boolean().default(true),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -73,26 +79,26 @@ function parseConfig(): Config {
 
             MAX_POSITION_SIZE_PCT: Number(process.env.MAX_POSITION_SIZE_PCT),
             MAX_DAILY_LOSS_PCT: Number(process.env.MAX_DAILY_LOSS_PCT),
-            RISK_PER_TRADE_PCT: Number(process.env.RISK_PER_TRADE_PCT) || 0.01, // v4.0 default (Conservative)
-            MAX_OPEN_POSITIONS: Number(process.env.MAX_OPEN_POSITIONS) || 2, // v4.0 default
-            DEFAULT_LEVERAGE: Number(process.env.DEFAULT_LEVERAGE) || 10,
+            RISK_PER_TRADE_PCT: Number(process.env.RISK_PER_TRADE_PCT) || 0.005, // 🔧 OPTIMIZADO: 0.5% default
+            MAX_OPEN_POSITIONS: Number(process.env.MAX_OPEN_POSITIONS) || 1, // 🔧 OPTIMIZADO: 1 trade default
+            DEFAULT_LEVERAGE: Number(process.env.DEFAULT_LEVERAGE) || 3, // 🔧 OPTIMIZADO: 3x default
             MAX_STOP_LOSS_PCT: process.env.MAX_STOP_LOSS_PCT ? Number(process.env.MAX_STOP_LOSS_PCT) : 0.001,
 
             // v4.0 Trading Parameters (read from ENV or use Schema defaults)
-            // Note: TAKE_PROFIT_ROI default is 1.5% price move = 15% ROI @ 10x leverage
-            TAKE_PROFIT_ROI: process.env.TAKE_PROFIT_ROI ? Number(process.env.TAKE_PROFIT_ROI) : 0.015,
-            STOP_LOSS_ROI: process.env.STOP_LOSS_ROI ? Number(process.env.STOP_LOSS_ROI) : 0.025,
+            // Note: TAKE_PROFIT_ROI optimized to 5% for better Risk:Reward (2.5:1)
+            TAKE_PROFIT_ROI: process.env.TAKE_PROFIT_ROI ? Number(process.env.TAKE_PROFIT_ROI) : 0.05, // 🔧 FINAL
+            STOP_LOSS_ROI: process.env.STOP_LOSS_ROI ? Number(process.env.STOP_LOSS_ROI) : 0.02, // 🔧 OPTIMIZADO
             TRAILING_ACTIVATION_ROI: process.env.TRAILING_ACTIVATION_ROI ? Number(process.env.TRAILING_ACTIVATION_ROI) : 0.03,
             TRAILING_LOCK_ROI: process.env.TRAILING_LOCK_ROI ? Number(process.env.TRAILING_LOCK_ROI) : 0.022,
 
             // v4.0 Timing & Filters
-            SCAN_INTERVAL_MS: process.env.SCAN_INTERVAL_MS ? Number(process.env.SCAN_INTERVAL_MS) : 600000,
+            SCAN_INTERVAL_MS: process.env.SCAN_INTERVAL_MS ? Number(process.env.SCAN_INTERVAL_MS) : 300000,
             POSITION_CHECK_INTERVAL_MS: process.env.POSITION_CHECK_INTERVAL_MS ? Number(process.env.POSITION_CHECK_INTERVAL_MS) : 5000,
-            MAX_TRADE_DURATION_MS: process.env.MAX_TRADE_DURATION_MS ? Number(process.env.MAX_TRADE_DURATION_MS) : 1200000,
+            MAX_TRADE_DURATION_MS: process.env.MAX_TRADE_DURATION_MS ? Number(process.env.MAX_TRADE_DURATION_MS) : 86400000,
 
             // v4.0 Streak Control
             MAX_CONSECUTIVE_LOSSES: process.env.MAX_CONSECUTIVE_LOSSES ? Number(process.env.MAX_CONSECUTIVE_LOSSES) : 2,
-            COOLDOWN_TIME_MS: process.env.COOLDOWN_TIME_MS ? Number(process.env.COOLDOWN_TIME_MS) : 1200000,
+            COOLDOWN_TIME_MS: process.env.COOLDOWN_TIME_MS ? Number(process.env.COOLDOWN_TIME_MS) : 3600000,
 
             DATABASE_URL: process.env.DATABASE_URL,
             REDIS_URL: process.env.REDIS_URL,
@@ -107,6 +113,12 @@ function parseConfig(): Config {
             TIMEFRAME: process.env.TIMEFRAME,
 
             OVERRIDE_CAPITAL: process.env.OVERRIDE_CAPITAL ? Number(process.env.OVERRIDE_CAPITAL) : undefined,
+
+            // Strategy flags (default true unless explicitly set to 'false')
+            STRATEGY_TREND_ENABLED: process.env.STRATEGY_TREND_ENABLED !== 'false',
+            STRATEGY_MEAN_REVERSION_ENABLED: process.env.STRATEGY_MEAN_REVERSION_ENABLED !== 'false',
+            STRATEGY_BREAKOUT_ENABLED: process.env.STRATEGY_BREAKOUT_ENABLED !== 'false',
+            STRATEGY_SCALPING_ENABLED: process.env.STRATEGY_SCALPING_ENABLED !== 'false',
 
             // Volatility Circuit Breaker
             MAX_VOLATILITY_ATR_PCT: process.env.MAX_VOLATILITY_ATR_PCT ? Number(process.env.MAX_VOLATILITY_ATR_PCT) : 0.02,

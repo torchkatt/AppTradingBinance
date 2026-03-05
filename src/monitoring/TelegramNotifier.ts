@@ -233,6 +233,8 @@ export class TelegramNotifier {
         price: number;
         rsi?: number;
         confidence?: number;
+        strategy?: string;
+        regime?: string;
     }): Promise<void> {
         if (!this.enabled || !this.bot || !this.chatId) return;
         try {
@@ -244,6 +246,12 @@ export class TelegramNotifier {
                 `🎯 Type: <b>${signal.type}</b>`,
                 `💰 Price: <code>$${signal.price.toFixed(2)}</code>`,
             ];
+            if (signal.strategy) {
+                message.push(`🧠 Strategy: <code>${signal.strategy}</code>`);
+            }
+            if (signal.regime) {
+                message.push(`🌐 Regime: <code>${signal.regime}</code>`);
+            }
             if (signal.rsi) {
                 message.push(`📊 RSI: <code>${signal.rsi.toFixed(2)}</code>`);
             }

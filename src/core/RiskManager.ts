@@ -154,13 +154,17 @@ export class RiskManager {
         // Dividimos el capital total entre el máximo de posiciones y multiplicamos por el leverage
         const leverageBasedSize = (balance / config.MAX_OPEN_POSITIONS) * config.DEFAULT_LEVERAGE / entryPrice;
 
-        // 3. Selección de tamaño: Priorizar apalancamiento solicitado por usuario
-        // AUNQUE el riesgo sea mayor al 1%, el usuario pidió 10x leverage en TODAS las operaciones.
-        let positionSize = leverageBasedSize;
+        // 3. Selección de tamaño: Usar el MENOR entre riesgo-basado y apalancamiento-basado
+        // Esto garantiza que NUNCA se arriesga más que config.RISK_PER_TRADE_PCT por trade,
+        // independientemente del apalancamiento configurado.
+        // Excepción: si riskBasedSize es 0 (stop muy ancho), usar leverageBasedSize como fallback.
+        let positionSize = (riskBasedSize > 0 && riskPerUnit > 0)
+            ? Math.min(riskBasedSize, leverageBasedSize)
+            : leverageBasedSize;
 
         // Límite de seguridad: Nunca exceder el apalancamiento máximo asignado
         const absoluteMaxSize = (balance * config.DEFAULT_LEVERAGE) / entryPrice;
-        positionSize = Math.min(leverageBasedSize, absoluteMaxSize);
+        positionSize = Math.min(positionSize, absoluteMaxSize);
 
         logger.info({
             entryPrice,
@@ -362,7 +366,33 @@ export class RiskManager {
         const dailyLossPct = totalPnL / this.accountBalance;
         if (dailyLossPct <= -config.MAX_DAILY_LOSS_PCT) {
             const reason = `🔴 CIRCUIT BREAKER ACTIVO: Pérdida diaria de ${(dailyLossPct * 100).toFixed(2)}% alcanzada (límite: ${(config.MAX_DAILY_LOSS_PCT * 100).toFixed(2)}%). Total PnL: $${totalPnL.toFixed(2)} (Realizado: $${this.dailyPnL.toFixed(2)}, No Realizado: $${unrealizedPnL.toFixed(2)})`;
-            logger.warn({ dailyPnL: this.dailyPnL, unrealizedPnL, totalPnL, dailyLossPct }, reason);
+            logger.error({ dailyPnL: this.dailyPnL, unrealizedPnL, totalPnL, dailyLossPct }, reason);
+
+            // 🚨 NUEVO: FORCE CLOSE ALL POSITIONS (Safety Mechanism)
+            logger.warn('🚨 ACTIVANDO MECANISMO DE EMERGENCIA: CERRANDO TODAS LAS POSICIONES');
+            try {
+                // Cerrar todas las posiciones abiertas inmediatamente
+                if (this.openPositions.size > 0) {
+                    logger.warn({ count: this.openPositions.size }, '⛔ Forzando cierre de TODAS las posiciones por circuit breaker');
+                    // Iterar y cerrar cada posición por símbolo
+                    for (const [sym] of this.openPositions.entries()) {
+                        try {
+                            await this.exchange.closeAllPositions(sym);
+                            logger.info({ symbol: sym }, '✅ Posición cerrada exitosamente en emergencia');
+                        } catch (closeError: any) {
+                            logger.error({ error: closeError.message, symbol: sym }, '❌ Error cerrando posición en emergencia');
+                        }
+                    }
+                    this.openPositions.clear();
+                }
+
+                // Marcar como emergencia para bloquear futuras operaciones
+                this.dailyPnL = -999999; // Flag de emergencia
+
+            } catch (error: any) {
+                logger.error({ error: error.message }, '❌ Error en mecanismo de emergencia');
+            }
+
             return { allowed: false, reason };
         }
 

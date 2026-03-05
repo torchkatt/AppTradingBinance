@@ -1,157 +1,149 @@
+/**
+ * MeanReversionStrategy v2.2
+ *
+ * - [v2.2] Filtro de sesgo macro via slope EMA200 (20 barras):
+ *          Solo LONG si slope positivo o neutro, solo SHORT si negativo o neutro.
+ *          Evita comprar en tendencias bajistas sostenidas y vender en alcistas.
+ * - [v2.2] RSI 30/70 (equilibrio entre v2.0 25/75 y v2.1 35/65)
+ * - [v2.1] BB 2.0σ, maxEma200DevPct 10%, adxThreshold 25
+ * - [v2.0] Stop Loss dinámico ATR * 1.5, Take Profit: BB midline
+ * - R:R típico 1:1.2 a 1:1.8 con WR esperado 52-62%
+ */
+
 import { Strategy } from './base/Strategy.js';
 import { OHLCV, Signal } from '../types/index.js';
-import { logger } from '../utils/logger.js';
-import { config } from '../config/index.js';
-/**
- * Estrategia de Mean Reversion usando Bollinger Bands + RSI
- * 
- * Lógica:
- * - LONG: Precio toca banda inferior de Bollinger + RSI < 30 (oversold)
- * - SHORT: Precio toca banda superior de Bollinger + RSI > 70 (overbought)
- * - Stop Loss: 2 * ATR desde el precio de entrada
- * - Take Profit: Media móvil (centro de Bollinger Bands)
- * 
- * Mejor para: Mercados laterales con volatilidad moderada
- */
+import { EMA, ATR, RSI, BollingerBands, ADX } from 'technicalindicators';
+
 export class MeanReversionStrategy extends Strategy {
-    name = 'Mean Reversion';
-    description = 'Bollinger Bands con confirmación RSI para reversión a la media';
+    name = 'Mean Reversion v2.2';
+    description = 'Reversión a la media — BB 2.0σ + RSI 30/70 + sesgo macro EMA200 (v2.2)';
+
     constructor(
-        private bbPeriod: number = 20,
-        private bbStdDev: number = 2,
-        private rsiPeriod: number = 14,
-        private rsiOversold: number = 40,      // MODERADO: Más actividad (antes 45)
-        private rsiOverbought: number = 60,    // MODERADO: Más actividad (antes 55)
+        private readonly bbPeriod: number        = 20,
+        private readonly bbStdDev: number        = 2.0,   // [v2.1] 2.5→2.0
+        private readonly rsiPeriod: number       = 14,
+        private readonly rsiOversold: number     = 30,    // [v2.2] equilibrio 25→30
+        private readonly rsiOverbought: number   = 70,    // [v2.2] equilibrio 75→70
+        private readonly atrMultiplier: number   = 1.5,
+        private readonly adxThreshold: number    = 25,    // [v2.1] 22→25
+        private readonly maxEma200DevPct: number = 0.10,  // [v2.1] 5%→10%
+        private readonly slopeLookback: number   = 20,    // [v2.2] barras para medir slope EMA200
+        private readonly slopeThreshold: number  = 0.002, // [v2.2] ±0.2% cambio = tendencia
     ) {
         super();
     }
+
     async analyze(data: OHLCV[]): Promise<Signal | null> {
-        // Necesitamos suficiente historial
-        if (data.length < Math.max(this.bbPeriod, this.rsiPeriod) + 1) {
-            return null;
-        }
+        if (data.length < Math.max(200, this.bbPeriod + 10)) return null;
+
         const closes = data.map(d => d.close);
-        const currentBar = data[data.length - 1];
-        const currentPrice = currentBar.close;
-        // Calcular Bollinger Bands
-        const sma = this.calculateSMA(closes, this.bbPeriod);
-        const stdDev = this.calculateStdDev(closes.slice(-this.bbPeriod));
-        const upperBand = sma + (this.bbStdDev * stdDev);
-        const lowerBand = sma - (this.bbStdDev * stdDev);
-        const bandwidth = ((upperBand - lowerBand) / sma) * 100;
-        // Calcular RSI
-        const rsi = this.calculateRSI(closes, this.rsiPeriod);
-        // Calcular ATR para stop loss dinámico
-        const atr = this.calculateATR(data, 14);
-        // Calcular %B (posición del precio dentro de las bandas)
-        const percentB = (currentPrice - lowerBand) / (upperBand - lowerBand);
-        // Calcular EMA 200 para filtro de tendencia
-        const ema200 = this.calculateEMA(closes, 200);
-        // SEÑAL LONG: Precio en banda inferior + RSI oversold
-        // [MODIFICADO] Excepción de Pánico: Si RSI < 30 (Muy barato), ignorar el filtro de tendencia EMA200.
-        // Si RSI entre 30-40, mantenemos el filtro conservador.
-        const isDeepOversold = rsi < 30; // Compra agresiva en caídas fuertes
-        const isStandardSignal = rsi < this.rsiOversold && currentPrice > ema200; // Compra estándar en tendencia
+        const highs  = data.map(d => d.high);
+        const lows   = data.map(d => d.low);
 
-        if (percentB <= 0.3 && (isDeepOversold || isStandardSignal)) {
-            // v4.0 TP/SL Logic using Config Targets
-            const tpPriceChange = currentPrice * (config.TAKE_PROFIT_ROI / config.DEFAULT_LEVERAGE);
-            const slPriceChange = currentPrice * (config.STOP_LOSS_ROI / config.DEFAULT_LEVERAGE);
+        // Usar última vela cerrada
+        const signalBar   = data[data.length - 2];
+        const currentPrice = signalBar.close;
 
-            const takeProfitPrice = currentPrice + tpPriceChange;
-            const stopLoss = currentPrice - slPriceChange;
+        // ── [v2.0] Verificar régimen: ADX debe ser bajo (mercado lateral) ─
+        const adxValues  = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+        const currentADX = adxValues[adxValues.length - 2]?.adx ?? 99;
 
-            const signal: Signal = {
+        if (currentADX >= this.adxThreshold) return null; // Mercado en tendencia → no revertir
+
+        // ── Indicadores ─────────────────────────────────────────────────
+        const bbValues = BollingerBands.calculate({ period: this.bbPeriod, stdDev: this.bbStdDev, values: closes });
+        const lastBB   = bbValues[bbValues.length - 2];
+        if (!lastBB) return null;
+
+        const { upper, middle, lower } = lastBB;
+        const percentB = (currentPrice - lower) / (upper - lower); // 0=lower, 1=upper
+
+        const rsiValues  = RSI.calculate({ period: this.rsiPeriod, values: closes });
+        const currentRSI = rsiValues[rsiValues.length - 2];
+
+        const atrValues  = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
+        const currentATR = atrValues[atrValues.length - 2] ?? 0;
+
+        // ── [v2.2] Filtro EMA200: desviación y slope (sesgo macro) ─────────
+        const ema200Series = EMA.calculate({ period: 200, values: closes });
+        const ema200Now  = ema200Series[ema200Series.length - 1] ?? 0;
+        const ema200Prev = ema200Series[ema200Series.length - 1 - this.slopeLookback] ?? ema200Now;
+
+        const devFromEma200 = Math.abs(currentPrice - ema200Now) / ema200Now;
+        if (devFromEma200 > this.maxEma200DevPct) return null;
+
+        // Slope: cambio porcentual del EMA200 en los últimos N bars
+        const ema200Slope = (ema200Now - ema200Prev) / ema200Prev;
+        // bull = subiendo, bear = bajando, neutral = flat
+        const trendBias = ema200Slope > this.slopeThreshold ? 'bull'
+            : ema200Slope < -this.slopeThreshold ? 'bear'
+            : 'neutral';
+
+        // ── SEÑAL LONG: precio en banda inferior + RSI oversold ─────────
+        // [v2.2] Solo si la macro-tendencia no es bajista (evita comprar en downtrends)
+        if (percentB <= 0.10 && currentRSI < this.rsiOversold && trendBias !== 'bear') {
+            const stopLoss   = currentPrice - currentATR * this.atrMultiplier;
+            const takeProfit = middle;
+            const actualSlDist = currentPrice - stopLoss;
+            const tpDist       = takeProfit - currentPrice;
+
+            if (tpDist < actualSlDist * 1.2) return null;
+
+            return {
                 type: 'long',
-                confidence: this.calculateConfidence(rsi, this.rsiOversold, percentB, 'long'),
-                stopLoss: stopLoss,
-                takeProfit: takeProfitPrice,
+                confidence: this.calcConfidence(currentRSI, this.rsiOversold, percentB, 'long'),
+                stopLoss,
+                takeProfit,
                 metadata: {
-                    rsi,
-                    percentB,
-                    lowerBand,
-                    upperBand,
-                    sma,
-                    bandwidth,
-                    atr,
-                    ema200,
                     strategy: this.name,
-                    takeProfitPct: 1.0,  // 10% ROI con 10x
-                }
+                    reason: `MR Long — %B ${percentB.toFixed(2)}, RSI ${currentRSI.toFixed(1)}, ADX ${currentADX.toFixed(1)}, bias ${trendBias}`,
+                    percentB, rsi: currentRSI, adx: currentADX, trendBias,
+                    upperBand: upper, midBand: middle, lowerBand: lower,
+                    atr: currentATR,
+                    rrRatio: (tpDist / actualSlDist).toFixed(2) + ':1',
+                },
             };
-            logger.info({
-                signal: 'LONG',
-                price: currentPrice,
-                rsi,
-                ema200,
-                percentB: percentB.toFixed(3),
-                confidence: signal.confidence
-            }, 'Mean Reversion LONG signal detected (Trend Confirmed)');
-            return signal;
         }
-        // SEÑAL SHORT: Precio en banda superior + RSI overbought (AGRESIVO: umbral 0.7)
-        // [FILTRO TENDENCIA] Solo operar SHORT si el precio está POR DEBAJO de la EMA200 (Tendencia Bajista)
-        if (percentB >= 0.7 && rsi > this.rsiOverbought && currentPrice < ema200) {
-            // v4.0 TP/SL Logic using Config Targets
-            const tpPriceChange = currentPrice * (config.TAKE_PROFIT_ROI / config.DEFAULT_LEVERAGE);
-            const slPriceChange = currentPrice * (config.STOP_LOSS_ROI / config.DEFAULT_LEVERAGE);
 
-            const takeProfitPrice = currentPrice - tpPriceChange;
-            const stopLoss = currentPrice + slPriceChange;
+        // ── SEÑAL SHORT: precio en banda superior + RSI overbought ──────
+        // [v2.2] Solo si la macro-tendencia no es alcista
+        if (percentB >= 0.90 && currentRSI > this.rsiOverbought && trendBias !== 'bull') {
+            const stopLoss   = currentPrice + currentATR * this.atrMultiplier;
+            const takeProfit = middle; // BB midline como target natural
+            const actualSlDist = stopLoss - currentPrice;
+            const tpDist       = currentPrice - takeProfit;
 
-            const signal: Signal = {
+            // Solo entrar si hay al menos R:R 1:1.2
+            if (tpDist < actualSlDist * 1.2) return null;
+
+            return {
                 type: 'short',
-                confidence: this.calculateConfidence(rsi, this.rsiOverbought, percentB, 'short'),
-                stopLoss: stopLoss,
-                takeProfit: takeProfitPrice,
+                confidence: this.calcConfidence(currentRSI, this.rsiOverbought, percentB, 'short'),
+                stopLoss,
+                takeProfit,
                 metadata: {
-                    rsi,
-                    percentB,
-                    lowerBand,
-                    upperBand,
-                    sma,
-                    bandwidth,
-                    atr,
-                    ema200,
                     strategy: this.name,
-                    takeProfitPct: 1.0, // 10% ROI con 10x
-                }
+                    reason: `MR Short — %B ${percentB.toFixed(2)}, RSI ${currentRSI.toFixed(1)}, ADX ${currentADX.toFixed(1)}, bias ${trendBias}`,
+                    percentB, rsi: currentRSI, adx: currentADX, trendBias,
+                    upperBand: upper, midBand: middle, lowerBand: lower,
+                    atr: currentATR,
+                    rrRatio: (tpDist / actualSlDist).toFixed(2) + ':1',
+                },
             };
-            logger.info({
-                signal: 'SHORT',
-                price: currentPrice,
-                rsi,
-                ema200,
-                percentB: percentB.toFixed(3),
-                confidence: signal.confidence
-            }, 'Mean Reversion SHORT signal detected (Trend Confirmed)');
-            return signal;
         }
+
         return null;
     }
-    /**
-     * Calcula nivel de confianza basado en la fuerza de la señal
-     */
-    private calculateConfidence(
-        rsi: number,
-        rsiThreshold: number,
-        percentB: number,
-        side: 'long' | 'short'
-    ): number {
-        let confidence = 0.5;
+
+    private calcConfidence(rsi: number, threshold: number, percentB: number, side: 'long' | 'short'): number {
         if (side === 'long') {
-            // Cuanto más bajo el RSI, mayor confianza
-            const rsiScore = Math.max(0, (rsiThreshold - rsi) / rsiThreshold);
-            // Cuanto más cerca de 0 el %B, mayor confianza
-            const bbScore = Math.max(0, 1 - percentB);
-            confidence = (rsiScore * 0.6) + (bbScore * 0.4);
+            const rsiScore = Math.max(0, (threshold - rsi) / threshold);
+            const bbScore  = Math.max(0, 0.1 - percentB) * 10;
+            return Math.min(0.90, 0.55 + rsiScore * 0.25 + bbScore * 0.20);
         } else {
-            // Cuanto más alto el RSI, mayor confianza
-            const rsiScore = Math.max(0, (rsi - rsiThreshold) / (100 - rsiThreshold));
-            // Cuanto más cerca de 1 el %B, mayor confianza
-            const bbScore = percentB;
-            confidence = (rsiScore * 0.6) + (bbScore * 0.4);
+            const rsiScore = Math.max(0, (rsi - threshold) / (100 - threshold));
+            const bbScore  = Math.max(0, percentB - 0.9) * 10;
+            return Math.min(0.90, 0.55 + rsiScore * 0.25 + bbScore * 0.20);
         }
-        return Math.min(0.95, Math.max(0.5, confidence));
     }
 }

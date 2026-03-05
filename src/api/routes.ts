@@ -4,6 +4,10 @@ import { config } from '../config/index.js';
 import { botProvider } from './botProvider.js';
 import { db } from '../database/index.js';
 
+// Cache for daily PnL to avoid hammering Binance API (refresh every 30s)
+let dailyPnLCache: { value: number; timestamp: number } | null = null;
+const DAILY_PNL_CACHE_TTL_MS = 30_000;
+
 export function createApiRoutes() {
     const router = Router();
 
@@ -61,22 +65,6 @@ export function createApiRoutes() {
     });
 
     /**
-     * GET /api/trades
-     */
-    router.get('/trades', async (req, res) => {
-        try {
-            const limit = parseInt(req.query.limit as string) || 50;
-            res.json({
-                trades: [],
-                pagination: { limit, total: 0 }
-            });
-        } catch (error: any) {
-            logger.error({ error: error.message }, 'Failed to get trades');
-            res.status(500).json({ error: 'Internal server error' });
-        }
-    });
-
-    /**
      * GET /api/metrics
      */
     router.get('/metrics', async (_req, res) => {
@@ -103,10 +91,22 @@ export function createApiRoutes() {
             const winRate = history.length > 0 ? winningTrades / history.length : 0;
             const consecutiveLosses = riskManager?.getConsecutiveLosses() || 0;
 
+            // Fetch dailyPnL directly from Binance (cached 30s) — always today's data
+            const now = Date.now();
+            if (!dailyPnLCache || now - dailyPnLCache.timestamp > DAILY_PNL_CACHE_TTL_MS) {
+                try {
+                    const livePnL = await bot.getExchange().fetchDailyPnL();
+                    dailyPnLCache = { value: livePnL, timestamp: now };
+                } catch {
+                    dailyPnLCache = { value: state.dailyPnL, timestamp: now };
+                }
+            }
+            const dailyPnL = dailyPnLCache.value;
+
             res.json({
                 balance: state.accountBalance,
                 totalRealBalance: state.totalRealBalance,
-                dailyPnL: state.dailyPnL,
+                dailyPnL,
                 allTimePnL: state.allTimePnL,
                 unrealizedPnL: state.unrealizedPnL,
                 dailyTrades: state.dailyTrades,
@@ -114,8 +114,8 @@ export function createApiRoutes() {
                 consecutiveLosses,
                 circuitBreakers: {
                     dailyLoss: {
-                        active: state.dailyPnL <= -(state.accountBalance * config.MAX_DAILY_LOSS_PCT),
-                        current: state.dailyPnL,
+                        active: dailyPnL <= -(state.accountBalance * config.MAX_DAILY_LOSS_PCT),
+                        current: dailyPnL,
                         limit: -(state.accountBalance * config.MAX_DAILY_LOSS_PCT)
                     },
                     consecutiveLosses: {
@@ -323,6 +323,29 @@ export function createApiRoutes() {
             });
         } catch (error: any) {
             logger.error({ error: error.message }, 'Failed to get analysis');
+            res.status(500).json({ error: 'Internal server error' });
+        }
+    });
+
+    /**
+     * GET /api/orchestrator
+     * Returns current market regime, active strategy, and signal counts
+     */
+    router.get('/orchestrator', async (_req, res) => {
+        try {
+            const bot = botProvider.getBot();
+            if (!bot) {
+                res.status(503).json({ error: 'Bot is initializing' });
+                return;
+            }
+            const info = bot.getOrchestratorInfo();
+            if (!info) {
+                res.json({ available: false, message: 'Orchestrator not active yet' });
+                return;
+            }
+            res.json({ available: true, ...info, timestamp: Date.now() });
+        } catch (error: any) {
+            logger.error({ error: error.message }, 'Failed to get orchestrator info');
             res.status(500).json({ error: 'Internal server error' });
         }
     });

@@ -24,7 +24,7 @@ async function runCrashAnalysis() {
     console.log(`Simulando crash de mercado...\n`);
 
     const exchange = new ExchangeConnector();
-    const strategy = new TrendMomentumStrategy(20, 200, 1.2, true); // Semi-Aggressive
+    const strategy = new TrendMomentumStrategy(); // Uses default params (v3.0)
 
     let totalPnL = 0;
     let winCount = 0;

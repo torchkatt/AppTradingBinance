@@ -52,6 +52,20 @@ export class TradingBot extends EventEmitter {
         return Object.fromEntries(this.lastAnalysis);
     }
 
+    /**
+     * Expone info del MultiStrategyOrchestrator (si es la estrategia activa)
+     */
+    public getOrchestratorInfo(): { regime: any; activeStrategy: string; signalCounts: Record<string, number>; summary: string } | null {
+        const orch = this.strategies[0] as any;
+        if (!orch || typeof orch.getCurrentRegime !== 'function') return null;
+        return {
+            regime:        orch.getCurrentRegime(),
+            activeStrategy: orch.getActiveStrategy(),
+            signalCounts:  orch.getSignalCounts(),
+            summary:       orch.getSummary(),
+        };
+    }
+
     public getMode(): string {
         return process.env.DRY_RUN === 'true' ? 'PAPER' : 'LIVE';
     }
@@ -123,8 +137,6 @@ export class TradingBot extends EventEmitter {
         this.startHousekeepingLoop();
         // Iniciar Reporte Horario
         this.startHourlyReporting();
-        // Iniciar Reporte Diario (Cada hora y al cierre)
-        this.startHourlyReporting();
         // Iniciar Sincronización de Balance y PnL (Cada 5 minutos)
         this.startBalanceSyncLoop();
 
@@ -133,7 +145,6 @@ export class TradingBot extends EventEmitter {
             strategies: this.strategies.map(s => s.name),
             timeframe: config.TIMEFRAME,
         }, '✅ Trading bot started');
-        await this.notifier.sendStartupMessage();
         // Iniciar reporte periódico de estado (cada 1 minuto)
         this.startStatusReporting();
     }
@@ -417,56 +428,61 @@ export class TradingBot extends EventEmitter {
             return;
         });
 
-        // Comando /analisis (Cardona Scanner)
+        // Comando /analisis (Multi-Strategy Scanner)
         this.notifier.registerCommand('analisis', async (bot, msg) => {
-            await bot.sendMessage(msg.chat.id, '🔍 <b>Analizando el mercado...</b>\n<i>Esto puede tomar unos segundos...</i>', { parse_mode: 'HTML' });
+            await bot.sendMessage(msg.chat.id, '🔍 <b>Analizando mercado...</b>\n<i>Escaneando todos los pares...</i>', { parse_mode: 'HTML' });
 
             const results = [];
             const symbols = config.SYMBOLS;
 
             for (const symbol of symbols) {
                 try {
-                    // Fetch candles
                     const candles = await this.exchange.fetchOHLCV(symbol, config.TIMEFRAME, undefined, 300);
                     if (!candles || candles.length < 200) continue;
 
-                    const closes = candles.map(c => c.close);
+                    const closes  = candles.map(c => c.close);
+                    const highs   = candles.map(c => c.high);
+                    const lows    = candles.map(c => c.low);
                     const currentPrice = closes[closes.length - 1];
 
-                    // EMA Trend
-                    const ema200 = EMA.calculate({ period: 200, values: closes }).pop() || 0;
+                    const ema200Val = EMA.calculate({ period: 200, values: closes }).pop() || 0;
+                    const adxValues = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+                    const adx       = adxValues[adxValues.length - 1]?.adx ?? 0;
+                    const plusDI    = adxValues[adxValues.length - 1]?.pdi ?? 0;
+                    const minusDI   = adxValues[adxValues.length - 1]?.mdi ?? 0;
 
-                    const isBullish = currentPrice > ema200;
-                    const trendIcon = isBullish ? '🟢' : '🔴';
-                    const trendText = isBullish ? 'ALCISTA' : 'BAJISTA';
+                    const bb         = BollingerBands.calculate({ period: 20, stdDev: 2, values: closes });
+                    const lastBB     = bb[bb.length - 1];
+                    const bandwidth  = (lastBB.upper - lastBB.lower) / lastBB.middle;
 
-                    // Squeeze (Volatilidad)
-                    const bb = BollingerBands.calculate({ period: 20, stdDev: 2, values: closes });
-                    const lastBB = bb[bb.length - 1];
-                    const bandwidth = (lastBB.upper - lastBB.lower) / lastBB.middle;
-                    // Simple threshold for "squeeze" visualisation
-                    const squeezeIcon = bandwidth < 0.05 ? '💣' : '〰️';
+                    // Determinar régimen
+                    let regimeIcon: string; let regimeText: string;
+                    if (adx >= 28 && plusDI > minusDI) { regimeIcon = '📈'; regimeText = 'TENDENCIA ↑'; }
+                    else if (adx >= 28 && minusDI > plusDI) { regimeIcon = '📉'; regimeText = 'TENDENCIA ↓'; }
+                    else if (bandwidth < 0.03 && adx < 28) { regimeIcon = '💥'; regimeText = 'BREAKOUT PREP'; }
+                    else if (adx < 22) { regimeIcon = '↔️'; regimeText = 'LATERAL'; }
+                    else { regimeIcon = '〰️'; regimeText = 'TRANSICIÓN'; }
 
-                    // Distance to EMA200
-                    const dist = ((currentPrice - ema200) / ema200) * 100;
-
+                    const dist = ((currentPrice - ema200Val) / ema200Val) * 100;
                     results.push(
-                        `<b>${symbol}</b> ${trendIcon}\n` +
-                        `   Trend: <b>${trendText}</b> (${dist > 0 ? '+' : ''}${dist.toFixed(2)}%)\n` +
-                        `   Vol: ${squeezeIcon} ${(bandwidth * 100).toFixed(2)}%`
+                        `${regimeIcon} <b>${symbol}</b>\n` +
+                        `   Régimen: <b>${regimeText}</b> | ADX: <code>${adx.toFixed(1)}</code>\n` +
+                        `   EMA200: ${dist > 0 ? '+' : ''}${dist.toFixed(2)}% | BBW: ${(bandwidth * 100).toFixed(2)}%`
                     );
-
                 } catch (e) {
                     logger.error({ error: e, symbol }, 'Error in telegram analysis');
                 }
             }
 
-            const header = '🧠 <b>ANÁLISIS DE MERCADO (Cardona)</b>\n\n';
-            const footer = '\n💡 <i>Leyenda: 🔴/🟢 Tendencia, 💣 Squeeze, 🔥 Sobreactendido</i>';
+            // Agregar resumen del orquestador
+            const orchInfo = this.getOrchestratorInfo();
+            const orchSummary = orchInfo
+                ? `\n\n🤖 <b>Orquestador</b>\n${orchInfo.summary.replace(/\n/g, '\n')}`
+                : '';
 
-            // Split into chunks if too long
-            const report = results.join('\n\n');
-            await bot.sendMessage(msg.chat.id, header + report + footer, { parse_mode: 'HTML' });
+            const header = '🧠 <b>SCANNER MULTI-ESTRATEGIA</b>\n\n';
+            const footer = '\n\n💡 <i>Leyenda: 📈 Trend↑ 📉 Trend↓ 💥 Breakout ↔️ Lateral</i>';
+            await bot.sendMessage(msg.chat.id, header + results.join('\n\n') + orchSummary + footer, { parse_mode: 'HTML' });
             return;
         });
 
@@ -694,22 +710,28 @@ export class TradingBot extends EventEmitter {
                 logger.warn({ symbol }, 'Calculated position size is 0 or negative');
                 return;
             }
+            const orchMeta = signal.metadata?.orchestrator as any;
             logger.info({
                 symbol,
-                side: signal.type,
-                price: currentBar.close,
+                side:           signal.type,
+                price:          currentBar.close,
                 quantity,
-                confidence: signal.confidence,
+                confidence:     signal.confidence,
                 stopLoss,
-                takeProfit: signal.takeProfit,
+                takeProfit:     signal.takeProfit,
+                strategy:       orchMeta?.activeStrategy || signal.metadata?.strategy || 'unknown',
+                regime:         orchMeta?.regime || 'unknown',
+                adx:            orchMeta?.adx,
             }, '📊 Opening position');
             // Notificar señal detectada
             await this.notifier.sendSignalAlert({
                 symbol,
-                type: signal.type.toUpperCase() as 'LONG' | 'SHORT',
-                price: currentBar.close,
-                rsi: (signal as any).rsi,
+                type:     signal.type.toUpperCase() as 'LONG' | 'SHORT',
+                price:    currentBar.close,
+                rsi:      (signal as any).rsi,
                 confidence: signal.confidence,
+                strategy: orchMeta?.activeStrategy || (signal.metadata?.strategy as string),
+                regime:   orchMeta?.regime,
             });
             // 3. Ejecutar orden en el exchange (o simular en DRY_RUN)
             const side = signal.type === 'long' ? 'buy' : 'sell';
@@ -967,7 +989,21 @@ export class TradingBot extends EventEmitter {
 
                     if (!exPos || Math.abs(exPos.contracts || exPos.amount || 0) < 0.00001) {
                         logger.info({ symbol, reason }, '🎊 Posición ya cerrada por Orden Programada (MAKER). Sincronizando estado local...');
-                        this.riskManager.closePosition(symbol, currentPrice);
+                        // Cancelar órdenes huérfanas (SL o TP que quedó pendiente tras el cierre)
+                        try {
+                            const orphanOrders = await this.exchange.getOpenOrders(symbol);
+                            for (const order of orphanOrders) {
+                                try {
+                                    await this.exchange.cancelOrder(order.id, symbol);
+                                    logger.info({ symbol, orderId: order.id }, '🗑️ Orden huérfana cancelada');
+                                } catch (cancelErr: any) {
+                                    logger.warn({ symbol, orderId: order.id, error: cancelErr.message }, 'No se pudo cancelar orden huérfana');
+                                }
+                            }
+                        } catch (ordersErr: any) {
+                            logger.warn({ symbol, error: ordersErr.message }, 'No se pudieron obtener órdenes huérfanas para cancelar');
+                        }
+                        await this.riskManager.closePosition(symbol, currentPrice);
                         return;
                     }
                 } catch (e) {
