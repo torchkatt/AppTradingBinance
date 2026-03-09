@@ -29,6 +29,7 @@ export class TradingBot extends EventEmitter {
     // private statusInterval: NodeJS.Timeout | null = null;
     private mutex: Mutex = new Mutex(); // Mutex para operaciones críticas
     private lastAnalysis: Map<string, any> = new Map(); // Store latest analysis per symbol
+    private lastVolatilityAlert: number = 0; // Throttle for volatility alerts
 
     // --- Métodos de Integración para API/Dashboard ---
 
@@ -59,10 +60,10 @@ export class TradingBot extends EventEmitter {
         const orch = this.strategies[0] as any;
         if (!orch || typeof orch.getCurrentRegime !== 'function') return null;
         return {
-            regime:        orch.getCurrentRegime(),
+            regime: orch.getCurrentRegime(),
             activeStrategy: orch.getActiveStrategy(),
-            signalCounts:  orch.getSignalCounts(),
-            summary:       orch.getSummary(),
+            signalCounts: orch.getSignalCounts(),
+            summary: orch.getSummary(),
         };
     }
 
@@ -166,11 +167,35 @@ export class TradingBot extends EventEmitter {
      */
     private startHourlyReporting(): void {
         const INTERVAL = 60 * 60 * 1000; // 1 Hora
-        setInterval(() => {
-            if (this.isRunning) {
+        setInterval(async () => {
+            if (!this.isRunning) return;
+            // 1. Reporte de régimen y estado del sistema
+            await this.sendRegimeReport();
+            // 2. Reporte de PnL y trades del día (solo si hay actividad)
+            const state = this.riskManager.getState();
+            if (state.dailyTrades > 0) {
                 this.sendDailyReport();
             }
         }, INTERVAL);
+    }
+
+    /**
+     * Envía reporte horario del régimen de mercado para visibilidad cuando no hay trades.
+     */
+    private async sendRegimeReport(): Promise<void> {
+        const orchInfo = this.getOrchestratorInfo();
+        const state = this.riskManager.getState();
+        if (!orchInfo?.regime) return;
+        await this.notifier.sendRegimeStatus({
+            regime:         orchInfo.regime.type,
+            description:    orchInfo.regime.description,
+            adx:            orchInfo.regime.adx,
+            atrPct:         orchInfo.regime.atrPct,
+            activeStrategy: orchInfo.activeStrategy,
+            signalCounts:   orchInfo.signalCounts,
+            balance:        state.accountBalance,
+            dailyPnL:       state.dailyPnL,
+        });
     }
 
     /**
@@ -440,20 +465,20 @@ export class TradingBot extends EventEmitter {
                     const candles = await this.exchange.fetchOHLCV(symbol, config.TIMEFRAME, undefined, 300);
                     if (!candles || candles.length < 200) continue;
 
-                    const closes  = candles.map(c => c.close);
-                    const highs   = candles.map(c => c.high);
-                    const lows    = candles.map(c => c.low);
+                    const closes = candles.map(c => c.close);
+                    const highs = candles.map(c => c.high);
+                    const lows = candles.map(c => c.low);
                     const currentPrice = closes[closes.length - 1];
 
                     const ema200Val = EMA.calculate({ period: 200, values: closes }).pop() || 0;
                     const adxValues = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
-                    const adx       = adxValues[adxValues.length - 1]?.adx ?? 0;
-                    const plusDI    = adxValues[adxValues.length - 1]?.pdi ?? 0;
-                    const minusDI   = adxValues[adxValues.length - 1]?.mdi ?? 0;
+                    const adx = adxValues[adxValues.length - 1]?.adx ?? 0;
+                    const plusDI = adxValues[adxValues.length - 1]?.pdi ?? 0;
+                    const minusDI = adxValues[adxValues.length - 1]?.mdi ?? 0;
 
-                    const bb         = BollingerBands.calculate({ period: 20, stdDev: 2, values: closes });
-                    const lastBB     = bb[bb.length - 1];
-                    const bandwidth  = (lastBB.upper - lastBB.lower) / lastBB.middle;
+                    const bb = BollingerBands.calculate({ period: 20, stdDev: 2, values: closes });
+                    const lastBB = bb[bb.length - 1];
+                    const bandwidth = (lastBB.upper - lastBB.lower) / lastBB.middle;
 
                     // Determinar régimen
                     let regimeIcon: string; let regimeText: string;
@@ -616,8 +641,6 @@ export class TradingBot extends EventEmitter {
                     const currentPrice = data[data.length - 1].close;
                     const atrPercent = currentATR / currentPrice;
 
-                    // Si el ATR% supera el máximo configurado (ej. 2%), abortamos entrada.
-                    // Esto evita operar durante mechas asesinas o crashes violentos.
                     if (atrPercent > config.MAX_VOLATILITY_ATR_PCT) {
                         logger.warn({
                             symbol,
@@ -627,7 +650,11 @@ export class TradingBot extends EventEmitter {
                             limit: (config.MAX_VOLATILITY_ATR_PCT * 100).toFixed(2) + '%'
                         }, '⛔ VOLATILITY ALERT: Market too volatile (Circuit Breaker). Skipping analysis.');
 
-                        // Opcional: Notificar usuario si es la primera vez que pasa en un rato (para evitar spam)
+                        // Notificar por Telegram máximo 1 vez cada 2 horas para no hacer spam
+                        if (Date.now() - this.lastVolatilityAlert > 2 * 60 * 60 * 1000) {
+                            this.lastVolatilityAlert = Date.now();
+                            await this.notifier.sendVolatilityAlert(symbol, atrPercent, config.MAX_VOLATILITY_ATR_PCT);
+                        }
                         return;
                     }
                 }
@@ -646,12 +673,9 @@ export class TradingBot extends EventEmitter {
                 }
 
                 // 4. Monitorear posiciones abiertas
-                // (Nota: Esto idealmente va fuera del mutex si solo monitorea, pero para consistencia lo dejamos aquí o en un loop separado)
-                // En este diseño, monitorOpenPositions se llama también desde el Fast Loop, así que no es crítico aquí.
                 await this.monitorOpenPositions(symbol, data[data.length - 1].close);
 
                 // [NUEVO] 1.6 Calculos para Reporte de Estado (Scanner)
-                // Usamos technicalindicators para metricas de reporte
                 const closes = data.map(c => c.close);
                 const highs = data.map(c => c.high);
                 const lows = data.map(c => c.low);
@@ -680,7 +704,6 @@ export class TradingBot extends EventEmitter {
     private async openPosition(symbol: string, signal: any, currentBar: OHLCV): Promise<void> {
         try {
             // [NUEVO] 0. Verificación de Spread (Protección contra deslizamiento)
-            // Obtener ticker para verificar spread en tiempo real
             const ticker = await this.exchange.getTicker(symbol);
             if (ticker && ticker.bid && ticker.ask) {
                 const spread = (ticker.ask - ticker.bid) / ticker.ask;
@@ -698,8 +721,12 @@ export class TradingBot extends EventEmitter {
             const canOpen = await this.riskManager.canOpenPosition(symbol);
             if (!canOpen.allowed) {
                 logger.warn({ symbol, reason: canOpen.reason }, 'Cannot open position');
+
+                // Notificar razones específicas de bloqueo para que el usuario sepa por qué el bot está quieto
                 if (canOpen.reason?.includes('CIRCUIT BREAKER')) {
                     await this.notifier.sendCircuitBreakerAlert(canOpen.reason, this.riskManager.getState().dailyPnL);
+                } else if (canOpen.reason?.includes('COOLDOWN') || canOpen.reason?.includes('META DIARIA')) {
+                    await this.notifier.sendAlert('INFO', `🚫 <b>Trade Omitido</b>\n\nPar: ${symbol}\nMotivo: ${canOpen.reason}`);
                 }
                 return;
             }
@@ -713,25 +740,25 @@ export class TradingBot extends EventEmitter {
             const orchMeta = signal.metadata?.orchestrator as any;
             logger.info({
                 symbol,
-                side:           signal.type,
-                price:          currentBar.close,
+                side: signal.type,
+                price: currentBar.close,
                 quantity,
-                confidence:     signal.confidence,
+                confidence: signal.confidence,
                 stopLoss,
-                takeProfit:     signal.takeProfit,
-                strategy:       orchMeta?.activeStrategy || signal.metadata?.strategy || 'unknown',
-                regime:         orchMeta?.regime || 'unknown',
-                adx:            orchMeta?.adx,
+                takeProfit: signal.takeProfit,
+                strategy: orchMeta?.activeStrategy || signal.metadata?.strategy || 'unknown',
+                regime: orchMeta?.regime || 'unknown',
+                adx: orchMeta?.adx,
             }, '📊 Opening position');
             // Notificar señal detectada
             await this.notifier.sendSignalAlert({
                 symbol,
-                type:     signal.type.toUpperCase() as 'LONG' | 'SHORT',
-                price:    currentBar.close,
-                rsi:      (signal as any).rsi,
+                type: signal.type.toUpperCase() as 'LONG' | 'SHORT',
+                price: currentBar.close,
+                rsi: (signal as any).rsi,
                 confidence: signal.confidence,
                 strategy: orchMeta?.activeStrategy || (signal.metadata?.strategy as string),
-                regime:   orchMeta?.regime,
+                regime: orchMeta?.regime,
             });
             // 3. Ejecutar orden en el exchange (o simular en DRY_RUN)
             const side = signal.type === 'long' ? 'buy' : 'sell';
@@ -781,7 +808,6 @@ export class TradingBot extends EventEmitter {
             const errorMessage = error.message || String(error);
             logger.error({ error: errorMessage, symbol }, '❌ Failed to open position');
             // No enviar alertas de Telegram por limitaciones conocidas de Bybit Demo
-            // Verificar tanto el mensaje como el objeto de error completo para asegurarnos
             const errorString = String(error) + (error.message || '') + JSON.stringify(error);
             const isKnownBybitDemoError = (
                 errorString.includes('Demo trading are not supported') ||
@@ -793,6 +819,7 @@ export class TradingBot extends EventEmitter {
             }
         }
     }
+
     /**
      * Cierra una posición existente
      */

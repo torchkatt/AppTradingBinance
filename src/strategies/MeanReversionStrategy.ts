@@ -1,13 +1,14 @@
 /**
- * MeanReversionStrategy v2.2
+ * MeanReversionStrategy v2.4
  *
- * - [v2.2] Filtro de sesgo macro via slope EMA200 (20 barras):
- *          Solo LONG si slope positivo o neutro, solo SHORT si negativo o neutro.
- *          Evita comprar en tendencias bajistas sostenidas y vender en alcistas.
- * - [v2.2] RSI 30/70 (equilibrio entre v2.0 25/75 y v2.1 35/65)
- * - [v2.1] BB 2.0σ, maxEma200DevPct 10%, adxThreshold 25
+ * - [v2.4] RSI 33/67 (v2.2 era 30/70 — demasiado extremo en 5m para producción)
+ *          %B 0.15/0.85 (v2.2 era 0.10/0.90 — precio llegaba muy poco a esos extremos)
+ *          Ambos cambios aumentan frecuencia de señales sin sacrificar el filtro EMA200.
+ * - [v2.3] adxThreshold subido a 28 (alineado con Orchestrator)
+ * - [v2.2] Filtro de sesgo macro via slope EMA200 (20 barras)
+ * - [v2.2] RSI 30/70, BB 2.0σ, maxEma200DevPct 10%, adxThreshold 25
  * - [v2.0] Stop Loss dinámico ATR * 1.5, Take Profit: BB midline
- * - R:R típico 1:1.2 a 1:1.8 con WR esperado 52-62%
+ * - R:R típico 1:1.2 a 1:1.8 con WR esperado 48-58%
  */
 
 import { Strategy } from './base/Strategy.js';
@@ -15,20 +16,20 @@ import { OHLCV, Signal } from '../types/index.js';
 import { EMA, ATR, RSI, BollingerBands, ADX } from 'technicalindicators';
 
 export class MeanReversionStrategy extends Strategy {
-    name = 'Mean Reversion v2.2';
-    description = 'Reversión a la media — BB 2.0σ + RSI 30/70 + sesgo macro EMA200 (v2.2)';
+    name = 'Mean Reversion v2.4';
+    description = 'Reversión a la media — BB 2.0σ + RSI 33/67 + sesgo macro EMA200 (v2.4)';
 
     constructor(
-        private readonly bbPeriod: number        = 20,
-        private readonly bbStdDev: number        = 2.0,   // [v2.1] 2.5→2.0
-        private readonly rsiPeriod: number       = 14,
-        private readonly rsiOversold: number     = 30,    // [v2.2] equilibrio 25→30
-        private readonly rsiOverbought: number   = 70,    // [v2.2] equilibrio 75→70
-        private readonly atrMultiplier: number   = 1.5,
-        private readonly adxThreshold: number    = 25,    // [v2.1] 22→25
+        private readonly bbPeriod: number = 20,
+        private readonly bbStdDev: number = 2.0,
+        private readonly rsiPeriod: number = 14,
+        private readonly rsiOversold: number = 33,    // [v2.4] 30→33 (más alcanzable en 5m)
+        private readonly rsiOverbought: number = 67,  // [v2.4] 70→67 (más alcanzable en 5m)
+        private readonly atrMultiplier: number = 1.5,
+        private readonly adxThreshold: number = 28,    // [v2.3] 25→28 (Aligned with Orchestrator)
         private readonly maxEma200DevPct: number = 0.10,  // [v2.1] 5%→10%
-        private readonly slopeLookback: number   = 20,    // [v2.2] barras para medir slope EMA200
-        private readonly slopeThreshold: number  = 0.002, // [v2.2] ±0.2% cambio = tendencia
+        private readonly slopeLookback: number = 20,    // [v2.2] barras para medir slope EMA200
+        private readonly slopeThreshold: number = 0.002, // [v2.2] ±0.2% cambio = tendencia
     ) {
         super();
     }
@@ -37,36 +38,36 @@ export class MeanReversionStrategy extends Strategy {
         if (data.length < Math.max(200, this.bbPeriod + 10)) return null;
 
         const closes = data.map(d => d.close);
-        const highs  = data.map(d => d.high);
-        const lows   = data.map(d => d.low);
+        const highs = data.map(d => d.high);
+        const lows = data.map(d => d.low);
 
         // Usar última vela cerrada
-        const signalBar   = data[data.length - 2];
+        const signalBar = data[data.length - 2];
         const currentPrice = signalBar.close;
 
         // ── [v2.0] Verificar régimen: ADX debe ser bajo (mercado lateral) ─
-        const adxValues  = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
+        const adxValues = ADX.calculate({ period: 14, high: highs, low: lows, close: closes });
         const currentADX = adxValues[adxValues.length - 2]?.adx ?? 99;
 
         if (currentADX >= this.adxThreshold) return null; // Mercado en tendencia → no revertir
 
         // ── Indicadores ─────────────────────────────────────────────────
         const bbValues = BollingerBands.calculate({ period: this.bbPeriod, stdDev: this.bbStdDev, values: closes });
-        const lastBB   = bbValues[bbValues.length - 2];
+        const lastBB = bbValues[bbValues.length - 2];
         if (!lastBB) return null;
 
         const { upper, middle, lower } = lastBB;
         const percentB = (currentPrice - lower) / (upper - lower); // 0=lower, 1=upper
 
-        const rsiValues  = RSI.calculate({ period: this.rsiPeriod, values: closes });
+        const rsiValues = RSI.calculate({ period: this.rsiPeriod, values: closes });
         const currentRSI = rsiValues[rsiValues.length - 2];
 
-        const atrValues  = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
+        const atrValues = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
         const currentATR = atrValues[atrValues.length - 2] ?? 0;
 
         // ── [v2.2] Filtro EMA200: desviación y slope (sesgo macro) ─────────
         const ema200Series = EMA.calculate({ period: 200, values: closes });
-        const ema200Now  = ema200Series[ema200Series.length - 1] ?? 0;
+        const ema200Now = ema200Series[ema200Series.length - 1] ?? 0;
         const ema200Prev = ema200Series[ema200Series.length - 1 - this.slopeLookback] ?? ema200Now;
 
         const devFromEma200 = Math.abs(currentPrice - ema200Now) / ema200Now;
@@ -77,15 +78,16 @@ export class MeanReversionStrategy extends Strategy {
         // bull = subiendo, bear = bajando, neutral = flat
         const trendBias = ema200Slope > this.slopeThreshold ? 'bull'
             : ema200Slope < -this.slopeThreshold ? 'bear'
-            : 'neutral';
+                : 'neutral';
 
         // ── SEÑAL LONG: precio en banda inferior + RSI oversold ─────────
+        // [v2.4] %B ≤ 0.15 (v2.2 era 0.10 — demasiado extremo para 5m)
         // [v2.2] Solo si la macro-tendencia no es bajista (evita comprar en downtrends)
-        if (percentB <= 0.10 && currentRSI < this.rsiOversold && trendBias !== 'bear') {
-            const stopLoss   = currentPrice - currentATR * this.atrMultiplier;
+        if (percentB <= 0.15 && currentRSI < this.rsiOversold && trendBias !== 'bear') {
+            const stopLoss = currentPrice - currentATR * this.atrMultiplier;
             const takeProfit = middle;
             const actualSlDist = currentPrice - stopLoss;
-            const tpDist       = takeProfit - currentPrice;
+            const tpDist = takeProfit - currentPrice;
 
             if (tpDist < actualSlDist * 1.2) return null;
 
@@ -106,12 +108,13 @@ export class MeanReversionStrategy extends Strategy {
         }
 
         // ── SEÑAL SHORT: precio en banda superior + RSI overbought ──────
+        // [v2.4] %B ≥ 0.85 (v2.2 era 0.90 — demasiado extremo para 5m)
         // [v2.2] Solo si la macro-tendencia no es alcista
-        if (percentB >= 0.90 && currentRSI > this.rsiOverbought && trendBias !== 'bull') {
-            const stopLoss   = currentPrice + currentATR * this.atrMultiplier;
+        if (percentB >= 0.85 && currentRSI > this.rsiOverbought && trendBias !== 'bull') {
+            const stopLoss = currentPrice + currentATR * this.atrMultiplier;
             const takeProfit = middle; // BB midline como target natural
             const actualSlDist = stopLoss - currentPrice;
-            const tpDist       = currentPrice - takeProfit;
+            const tpDist = currentPrice - takeProfit;
 
             // Solo entrar si hay al menos R:R 1:1.2
             if (tpDist < actualSlDist * 1.2) return null;
@@ -138,11 +141,11 @@ export class MeanReversionStrategy extends Strategy {
     private calcConfidence(rsi: number, threshold: number, percentB: number, side: 'long' | 'short'): number {
         if (side === 'long') {
             const rsiScore = Math.max(0, (threshold - rsi) / threshold);
-            const bbScore  = Math.max(0, 0.1 - percentB) * 10;
+            const bbScore = Math.max(0, 0.1 - percentB) * 10;
             return Math.min(0.90, 0.55 + rsiScore * 0.25 + bbScore * 0.20);
         } else {
             const rsiScore = Math.max(0, (rsi - threshold) / (100 - threshold));
-            const bbScore  = Math.max(0, percentB - 0.9) * 10;
+            const bbScore = Math.max(0, percentB - 0.9) * 10;
             return Math.min(0.90, 0.55 + rsiScore * 0.25 + bbScore * 0.20);
         }
     }

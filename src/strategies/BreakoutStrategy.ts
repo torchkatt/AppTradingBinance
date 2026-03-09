@@ -1,12 +1,13 @@
 /**
- * BreakoutStrategy v1.2
+ * BreakoutStrategy v1.3
  *
  * Detecta rupturas de zonas de consolidación con volumen significativo.
  *
- * [v1.2] Añadido filtro de sesgo macro (EMA200 slope):
- *         Solo LONG si macro-tendencia no es bajista.
- *         Solo SHORT si macro-tendencia no es alcista.
- * [v1.1] maxRangePct 2.0% (equilibrio entre 1.5% y 2.5%), vol 2.0x, TP ×2.0
+ * [v1.3] consolidationBars 30→20 (2.5h→1.7h en 5m).
+ *        30 barras era demasiado exigente en producción: BTC rara vez consolida
+ *        2.5h en rango <2%. 20 barras sigue siendo un setup válido con menos falsos negativos.
+ * [v1.2] Filtro de sesgo macro EMA200 slope (no contra-tendencia)
+ * [v1.1] maxRangePct 2.0%, vol 2.0x, TP ×2.0
  * [v1.0] Consolidación N barras, ADX 15-28, SL = lado opuesto + ATR
  *
  * WR esperado: 43-52% con sesgo macro
@@ -18,11 +19,11 @@ import { OHLCV, Signal } from '../types/index.js';
 import { ATR, ADX, SMA, EMA } from 'technicalindicators';
 
 export class BreakoutStrategy extends Strategy {
-    name = 'Breakout v1.2';
-    description = 'Ruptura de consolidación — sesgo macro EMA200 + vol 2.0x + TP ×2.0 (v1.2)';
+    name = 'Breakout v1.3';
+    description = 'Ruptura de consolidación — sesgo macro EMA200 + vol 2.0x + TP ×2.0 (v1.3)';
 
     constructor(
-        private readonly consolidationBars: number  = 30,     // [v1.1] 25→30 barras
+        private readonly consolidationBars: number  = 20,     // [v1.3] 30→20 barras (1.7h en 5m)
         private readonly maxRangePct: number         = 0.020, // [v1.2] 2.0% (equilibrio 1.5%-2.5%)
         private readonly volMultiplier: number       = 2.00,  // [v1.2] 1.8x→2.0x
         private readonly atrMultiplier: number       = 1.0,   // Buffer ATR para SL

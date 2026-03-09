@@ -304,6 +304,67 @@ export class TelegramNotifier {
         }
     }
     /**
+     * Alerta cuando el circuit breaker de volatilidad bloquea el análisis.
+     * Se llama desde TradingBot para dar visibilidad cuando el bot no opera por ATR alto.
+     */
+    async sendVolatilityAlert(symbol: string, atrPct: number, limitPct: number): Promise<void> {
+        if (!this.enabled || !this.bot || !this.chatId) return;
+        const message = [
+            `⛔ <b>VOLATILIDAD ALTA — sin operar</b>`,
+            ``,
+            `📊 Símbolo: <code>${symbol}</code>`,
+            `📈 ATR actual: <code>${(atrPct * 100).toFixed(2)}%</code>`,
+            `🔒 Límite configurado: <code>${(limitPct * 100).toFixed(2)}%</code>`,
+            ``,
+            `<i>El bot retoma operaciones cuando ATR baje del límite.</i>`,
+        ].join('\n');
+        try {
+            await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML' });
+        } catch (error) {
+            logger.error({ error }, 'Failed to send volatility alert');
+        }
+    }
+
+    /**
+     * Reporte horario del régimen de mercado y estrategia activa.
+     * Enviado automáticamente para que el usuario sepa que el bot está corriendo
+     * aunque no haya generado señales.
+     */
+    async sendRegimeStatus(info: {
+        regime: string;
+        description: string;
+        adx: number;
+        atrPct: number;
+        activeStrategy: string;
+        signalCounts: Record<string, number>;
+        balance: number;
+        dailyPnL: number;
+    }): Promise<void> {
+        if (!this.enabled || !this.bot || !this.chatId) return;
+        const totalSignals = Object.values(info.signalCounts).reduce((a, b) => a + b, 0);
+        const pnlSign = info.dailyPnL >= 0 ? '+' : '';
+        const message = [
+            `🔄 <b>Estado del Bot — ${new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })}</b>`,
+            ``,
+            `🌐 Régimen: <b>${info.description}</b>`,
+            `📊 ADX: <code>${info.adx.toFixed(1)}</code>  |  ATR: <code>${(info.atrPct * 100).toFixed(2)}%</code>`,
+            `🎯 Estrategia activa: <code>${info.activeStrategy || 'ninguna'}</code>`,
+            ``,
+            `📈 Señales hoy: <code>${totalSignals}</code>`,
+            `  • Trend: ${info.signalCounts.trend ?? 0}  Breakout: ${info.signalCounts.breakout ?? 0}`,
+            `  • MeanRev: ${info.signalCounts.meanReversion ?? 0}  Scalping: ${info.signalCounts.scalping ?? 0}`,
+            ``,
+            `💰 Balance: <code>$${info.balance.toFixed(2)}</code>`,
+            `📈 PnL hoy: <code>${pnlSign}$${info.dailyPnL.toFixed(2)}</code>`,
+        ].join('\n');
+        try {
+            await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML', disable_notification: true });
+        } catch (error) {
+            logger.error({ error }, 'Failed to send regime status');
+        }
+    }
+
+    /**
      * Verifica si las notificaciones están habilitadas
      */
     isEnabled(): boolean {
